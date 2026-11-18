@@ -1,3 +1,4 @@
+mod collection;
 mod search;
 
 pub use search::search;
@@ -15,9 +16,9 @@ use crate::db::{
     sync_children_search_docs, sync_page_search_doc, sync_web_link_search_doc, DbManager,
 };
 use crate::error::AppError;
-use crate::markdown::{normalize_line_endings, render_markdown_preview};
+use crate::markdown::{extract_search_text, normalize_line_endings, render_markdown_preview};
 use crate::models::{
-    CreateWebLinkInput, KnowledgePageSummary, PageKind, PageSummary, PageView, ParentRef,
+    CollectionSort, CreateWebLinkInput, KnowledgePageSummary, PageKind, PageSummary, PageView, ParentRef,
     ResultPage, SaveReceipt, Tag, TagSummary, TrashEntry, TrashKind, UpdateWebLinkPatch,
     WebLinkDetail, WebLinkPreview, WebLinkSummary,
 };
@@ -25,22 +26,11 @@ use crate::normalize::{
     display_diary_title, display_page_title, display_web_link_title, normalize_search_key,
     now_utc_ms, prefix_upper_bound, validate_and_normalize_url, validate_diary_date,
 };
+use crate::web_metadata::{decode_thumbnail, thumbnail_data_url};
 
 const PAGE_SIZE: usize = 30;
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WebLinkCursor {
-    updated_at_ms: i64,
-    id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct KnowledgePageCursor {
-    updated_at_ms: i64,
-    id: String,
-}
+const WEB_LINK_COLUMNS: &str = "r.id, r.url, r.normalized_url, r.title, r.description, r.created_at_ms, r.updated_at_ms,
+    EXISTS(SELECT 1 FROM web_link_thumbnails WHERE web_link_id = r.id)";
 
 fn encode_cursor<T: Serialize>(cursor: &T) -> Result<String, AppError> {
     let json = serde_json::to_vec(cursor)
@@ -63,31 +53,29 @@ fn host_from_normalized_url(normalized_url: &str) -> String {
         .unwrap_or_default()
 }
 
-fn build_web_link_summary(
-    id: String,
-    url: String,
-    normalized_url: String,
-    title: String,
-    description: String,
-    created_at_ms: i64,
-    updated_at_ms: i64,
-) -> WebLinkSummary {
+fn read_web_link_summary(conn: &Connection, row: &rusqlite::Row<'_>) -> Result<WebLinkSummary, AppError> {
+    let id: String = row.get(0)?;
+    let normalized_url: String = row.get(2)?;
+    let title: String = row.get(3)?;
     let host = host_from_normalized_url(&normalized_url);
     let display_title = display_web_link_title(&title, &host);
-    WebLinkSummary {
+    let tags = fetch_tags_for_web_link(conn, &id)?;
+    Ok(WebLinkSummary {
         id,
-        url,
+        url: row.get(1)?,
         normalized_url,
         title,
         display_title,
-        description,
-        created_at_ms,
-        updated_at_ms,
-    }
+        description: row.get(4)?,
+        created_at_ms: row.get(5)?,
+        updated_at_ms: row.get(6)?,
+        has_thumbnail: row.get(7)?,
+        tags,
+    })
 }
 
 fn fetch_tags_for_web_link(conn: &Connection, web_link_id: &str) -> Result<Vec<Tag>, AppError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.name, t.name_key
          FROM tags t
          JOIN web_link_tags wt ON wt.tag_id = t.id
@@ -105,7 +93,7 @@ fn fetch_tags_for_web_link(conn: &Connection, web_link_id: &str) -> Result<Vec<T
 }
 
 fn fetch_tags_for_page(conn: &Connection, page_id: &str) -> Result<Vec<Tag>, AppError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.name, t.name_key
          FROM tags t
          JOIN page_tags pt ON pt.tag_id = t.id
@@ -123,17 +111,17 @@ fn fetch_tags_for_page(conn: &Connection, page_id: &str) -> Result<Vec<Tag>, App
 }
 
 fn get_web_link_inner(conn: &Connection, id: &str) -> Result<WebLinkDetail, AppError> {
-    let row: Option<(String, String, String, String, i64, i64)> = conn
+    let row: Option<(String, String, String, String, i64, i64, bool)> = conn
         .query_row(
-            "SELECT url, normalized_url, title, description, created_at_ms, updated_at_ms
-             FROM web_links
-             WHERE id = ?1 AND deleted_at_ms IS NULL",
+            "SELECT url, normalized_url, title, description, created_at_ms, updated_at_ms,
+                EXISTS(SELECT 1 FROM web_link_thumbnails WHERE web_link_id = w.id)
+             FROM web_links w WHERE w.id = ?1 AND w.deleted_at_ms IS NULL",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .optional()?;
 
-    let Some((url, normalized_url, title, description, created_at_ms, updated_at_ms)) = row else {
+    let Some((url, normalized_url, title, description, created_at_ms, updated_at_ms, has_thumbnail)) = row else {
         return Err(AppError::NotFound("指定されたWebリンクが見つかりません".into()));
     };
 
@@ -172,6 +160,7 @@ fn get_web_link_inner(conn: &Connection, id: &str) -> Result<WebLinkDetail, AppE
         description,
         created_at_ms,
         updated_at_ms,
+        has_thumbnail,
         tags,
         pages,
     })
@@ -402,52 +391,14 @@ fn query_duplicate_web_links(
     normalized_url: &str,
     exclude_id: Option<&str>,
 ) -> Result<Vec<WebLinkSummary>, AppError> {
+    let sql = format!("SELECT {WEB_LINK_COLUMNS} FROM web_links r
+        WHERE r.normalized_url = ?1 AND r.deleted_at_ms IS NULL AND (?2 IS NULL OR r.id <> ?2)
+        ORDER BY r.updated_at_ms DESC, r.id ASC");
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let mut rows = stmt.query(params![normalized_url, exclude_id])?;
     let mut results = Vec::new();
-    match exclude_id {
-        Some(ex) => {
-            let mut stmt = conn.prepare(
-                "SELECT id, url, normalized_url, title, description, created_at_ms, updated_at_ms
-                 FROM web_links
-                 WHERE normalized_url = ?1 AND deleted_at_ms IS NULL AND id <> ?2
-                 ORDER BY updated_at_ms DESC, id ASC",
-            )?;
-            let rows = stmt.query_map(params![normalized_url, ex], |r| {
-                Ok(build_web_link_summary(
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?;
-            for r in rows {
-                results.push(r?);
-            }
-        }
-        None => {
-            let mut stmt = conn.prepare(
-                "SELECT id, url, normalized_url, title, description, created_at_ms, updated_at_ms
-                 FROM web_links
-                 WHERE normalized_url = ?1 AND deleted_at_ms IS NULL
-                 ORDER BY updated_at_ms DESC, id ASC",
-            )?;
-            let rows = stmt.query_map([normalized_url], |r| {
-                Ok(build_web_link_summary(
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?;
-            for r in rows {
-                results.push(r?);
-            }
-        }
+    while let Some(row) = rows.next()? {
+        results.push(read_web_link_summary(conn, row)?);
     }
     Ok(results)
 }
@@ -469,6 +420,7 @@ pub fn create_web_link(
     let norm = validate_and_normalize_url(&input.url)?;
     let title = input.title.trim().to_string();
     let description = normalize_line_endings(input.description.trim());
+    let thumbnail = input.thumbnail.as_deref().map(decode_thumbnail).transpose()?;
 
     db.with_transaction(|tx| {
         if !allow_duplicate {
@@ -494,6 +446,9 @@ pub fn create_web_link(
                 now
             ],
         )?;
+        if let Some(jpeg) = thumbnail {
+            tx.execute("INSERT INTO web_link_thumbnails (web_link_id, jpeg) VALUES (?1, ?2)", params![id, jpeg])?;
+        }
         sync_web_link_search_doc(tx, &id)?;
         get_web_link_inner(tx, &id)
     })
@@ -509,6 +464,7 @@ pub fn update_web_link(
         Some(raw) => Some(validate_and_normalize_url(&raw)?),
         None => None,
     };
+    let thumbnail = patch.thumbnail.as_deref().map(decode_thumbnail).transpose()?;
 
     db.with_transaction(|tx| {
         let existing: Option<(String, String, String, String)> = tx
@@ -547,10 +503,20 @@ pub fn update_web_link(
             None => old_desc.clone(),
         };
 
+        let thumbnail_changed = match thumbnail {
+            Some(jpeg) => tx.execute(
+                "INSERT INTO web_link_thumbnails (web_link_id, jpeg) VALUES (?1, ?2)
+                 ON CONFLICT(web_link_id) DO UPDATE SET jpeg = excluded.jpeg WHERE jpeg <> excluded.jpeg",
+                params![id, jpeg],
+            )? > 0,
+            None if norm_changed => tx.execute("DELETE FROM web_link_thumbnails WHERE web_link_id = ?1", [id])? > 0,
+            None => false,
+        };
         let any_changed = new_url != old_url
             || new_norm_url != old_norm_url
             || new_title != old_title
-            || new_desc != old_desc;
+            || new_desc != old_desc
+            || thumbnail_changed;
 
         if any_changed {
             let now = now_utc_ms();
@@ -578,83 +544,26 @@ pub fn update_web_link(
 pub fn list_web_links(
     db: &DbManager,
     cursor: Option<&str>,
+    sort: CollectionSort,
 ) -> Result<ResultPage<WebLinkSummary>, AppError> {
-    let decoded = match cursor {
-        Some(c) if !c.trim().is_empty() => Some(decode_cursor::<WebLinkCursor>(c)?),
-        _ => None,
-    };
-
     db.with_reader(|conn| {
-        let mut items = Vec::new();
-        let limit_plus_one = (PAGE_SIZE + 1) as i64;
-
-        match decoded {
-            Some(cur) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, url, normalized_url, title, description, created_at_ms, updated_at_ms
-                     FROM web_links
-                     WHERE deleted_at_ms IS NULL
-                       AND (updated_at_ms < ?1 OR (updated_at_ms = ?1 AND id > ?2))
-                     ORDER BY updated_at_ms DESC, id ASC
-                     LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(params![cur.updated_at_ms, cur.id, limit_plus_one], |r| {
-                    Ok(build_web_link_summary(
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                })?;
-                for r in rows {
-                    items.push(r?);
-                }
-            }
-            None => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, url, normalized_url, title, description, created_at_ms, updated_at_ms
-                     FROM web_links
-                     WHERE deleted_at_ms IS NULL
-                     ORDER BY updated_at_ms DESC, id ASC
-                     LIMIT ?1",
-                )?;
-                let rows = stmt.query_map([limit_plus_one], |r| {
-                    Ok(build_web_link_summary(
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                })?;
-                for r in rows {
-                    items.push(r?);
-                }
-            }
-        }
-
-        let next_cursor = if items.len() > PAGE_SIZE {
-            items.truncate(PAGE_SIZE);
-            let last = items.last().unwrap();
-            Some(encode_cursor(&WebLinkCursor {
-                updated_at_ms: last.updated_at_ms,
-                id: last.id.clone(),
-            })?)
-        } else {
-            None
-        };
-
-        Ok(ResultPage { items, next_cursor })
+        collection::list(conn, collection::Collection::WebLinks, WEB_LINK_COLUMNS, sort, cursor,
+            |row| read_web_link_summary(conn, row))
     })
 }
 
 pub fn get_web_link(db: &DbManager, id: &str) -> Result<WebLinkDetail, AppError> {
     db.with_reader(|conn| get_web_link_inner(conn, id))
+}
+
+pub fn get_web_link_thumbnail(db: &DbManager, id: &str) -> Result<Option<String>, AppError> {
+    db.with_reader(|conn| {
+        let image: Option<Vec<u8>> = conn.prepare_cached(
+            "SELECT thumbnail.jpeg FROM web_link_thumbnails thumbnail
+             JOIN web_links w ON w.id = thumbnail.web_link_id WHERE w.id = ?1 AND w.deleted_at_ms IS NULL",
+        )?.query_row([id], |row| row.get(0)).optional()?;
+        Ok(image.as_deref().map(thumbnail_data_url))
+    })
 }
 
 pub fn get_web_link_preview(db: &DbManager, id: &str) -> Result<WebLinkPreview, AppError> {
@@ -750,75 +659,26 @@ pub fn create_knowledge_page(
 pub fn list_knowledge_pages(
     db: &DbManager,
     cursor: Option<&str>,
+    sort: CollectionSort,
 ) -> Result<ResultPage<KnowledgePageSummary>, AppError> {
-    let decoded = match cursor {
-        Some(c) if !c.trim().is_empty() => Some(decode_cursor::<KnowledgePageCursor>(c)?),
-        _ => None,
-    };
-
     db.with_reader(|conn| {
-        let mut items = Vec::new();
-        let limit_plus_one = (PAGE_SIZE + 1) as i64;
-
-        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<KnowledgePageSummary> {
-            let title: String = r.get(1)?;
-            let display_title = display_page_title(&title);
-            Ok(KnowledgePageSummary {
-                id: r.get(0)?,
-                title,
-                display_title,
-                revision: r.get(2)?,
-                created_at_ms: r.get(3)?,
-                updated_at_ms: r.get(4)?,
+        collection::list(conn, collection::Collection::Knowledge,
+            "r.id, r.title, r.revision, r.created_at_ms, r.updated_at_ms, substr(r.body_markdown, 1, 500)",
+            sort, cursor, |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let markdown: String = row.get(5)?;
+                Ok(KnowledgePageSummary {
+                    tags: fetch_tags_for_page(conn, &id)?,
+                    id,
+                    display_title: display_page_title(&title),
+                    title,
+                    revision: row.get(2)?,
+                    created_at_ms: row.get(3)?,
+                    updated_at_ms: row.get(4)?,
+                    excerpt: extract_search_text(&markdown).chars().take(260).collect(),
+                })
             })
-        };
-
-        match decoded {
-            Some(cur) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, title, revision, created_at_ms, updated_at_ms
-                     FROM pages INDEXED BY idx_pages_knowledge_active_updated
-                     WHERE web_link_id IS NULL
-                       AND diary_date IS NULL
-                       AND deleted_at_ms IS NULL
-                       AND (updated_at_ms < ?1 OR (updated_at_ms = ?1 AND id > ?2))
-                     ORDER BY updated_at_ms DESC, id ASC
-                     LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(params![cur.updated_at_ms, cur.id, limit_plus_one], map_row)?;
-                for r in rows {
-                    items.push(r?);
-                }
-            }
-            None => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, title, revision, created_at_ms, updated_at_ms
-                     FROM pages INDEXED BY idx_pages_knowledge_active_updated
-                     WHERE web_link_id IS NULL
-                       AND diary_date IS NULL
-                       AND deleted_at_ms IS NULL
-                     ORDER BY updated_at_ms DESC, id ASC
-                     LIMIT ?1",
-                )?;
-                let rows = stmt.query_map([limit_plus_one], map_row)?;
-                for r in rows {
-                    items.push(r?);
-                }
-            }
-        }
-
-        let next_cursor = if items.len() > PAGE_SIZE {
-            items.truncate(PAGE_SIZE);
-            let last = items.last().unwrap();
-            Some(encode_cursor(&KnowledgePageCursor {
-                updated_at_ms: last.updated_at_ms,
-                id: last.id.clone(),
-            })?)
-        } else {
-            None
-        };
-
-        Ok(ResultPage { items, next_cursor })
     })
 }
 

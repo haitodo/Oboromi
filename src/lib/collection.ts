@@ -1,6 +1,36 @@
 import { writable } from 'svelte/store';
 import { normalizeError } from './api';
-import type { ResultPage } from './types';
+import type { CollectionSort, ResultPage } from './types';
+
+export const collectionLayouts = {
+  inbox: { label: '受信箱', icon: 'panel' },
+  list: { label: 'リスト', icon: 'list' },
+  gallery: { label: 'ギャラリー', icon: 'grid' },
+  table: { label: 'テーブル', icon: 'table' },
+};
+
+export const collectionSorts: Record<CollectionSort, string> = {
+  updated_desc: '更新が新しい順',
+  updated_asc: '更新が古い順',
+  created_desc: '作成が新しい順',
+  created_asc: '作成が古い順',
+  title_asc: 'タイトル昇順',
+  title_desc: 'タイトル降順',
+};
+
+export type CollectionKind = 'web_links' | 'knowledge';
+export type CollectionLayout = keyof typeof collectionLayouts;
+export type CollectionPreferences = { layout: CollectionLayout; sort: CollectionSort };
+
+export function readCollectionPreferences(kind: CollectionKind): CollectionPreferences {
+  const defaults: CollectionPreferences = { layout: 'gallery', sort: 'updated_desc' };
+  try {
+    const value = JSON.parse(localStorage.getItem(`oboromi-collection-${kind}`) ?? 'null');
+    if (value && Object.hasOwn(collectionLayouts, value.layout)) defaults.layout = value.layout;
+    if (value && Object.hasOwn(collectionSorts, value.sort)) defaults.sort = value.sort;
+  } catch { /* Use the default view. */ }
+  return defaults;
+}
 
 interface CollectionState<T> extends ResultPage<T> {
   loading: boolean;
@@ -50,11 +80,15 @@ export function createCollection<T>(fetchPage: (cursor?: string) => Promise<Resu
     if (!requested) void load();
   }
 
+  function refresh() {
+    if (requested) void load();
+  }
+
   function clear() {
     request += 1;
     requested = false;
     publish({ items: [], loading: false, error: '' });
   }
 
-  return { subscribe: store.subscribe, load, ensureLoaded, clear, invalidate };
+  return { subscribe: store.subscribe, load, ensureLoaded, refresh, clear, invalidate };
 }

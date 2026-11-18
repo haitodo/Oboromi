@@ -3,6 +3,7 @@ import type {
   AppErrorPayload,
   AppStatus,
   BackupInfo,
+  CollectionSort,
   KnowledgePageSummary,
   PageView,
   RestoreInfo,
@@ -15,6 +16,7 @@ import type {
   TagSummary,
   TrashEntry,
   WebLinkDetail,
+  WebLinkMetadata,
   WebLinkPreview,
   WebLinkSummary,
 } from './types';
@@ -77,28 +79,30 @@ export const api = {
     call<string[]>('list_diary_dates', { year, month }),
 
   createWebLink: (
-    input: { url: string; title: string; description: string },
+    input: { url: string; title: string; description: string; thumbnail?: string },
     allowDuplicate = false
   ) => call<WebLinkDetail>('create_web_link', { input, allowDuplicate }),
   updateWebLink: (
     id: string,
-    patch: { url?: string; title?: string; description?: string },
+    patch: { url?: string; title?: string; description?: string; thumbnail?: string },
     allowDuplicate = false
   ) => call<WebLinkDetail>('update_web_link', { id, patch, allowDuplicate }),
   findWebLinkDuplicates: (url: string, excludeId?: string) =>
     call<WebLinkSummary[]>('find_web_link_duplicates', { url, excludeId }),
-  listWebLinks: (cursor?: string) =>
-    call<ResultPage<WebLinkSummary>>('list_web_links', { cursor }),
+  listWebLinks: (cursor?: string, sort?: CollectionSort) =>
+    call<ResultPage<WebLinkSummary>>('list_web_links', { cursor, sort }),
   getWebLink: (id: string) => call<WebLinkDetail>('get_web_link', { id }),
   getWebLinkPreview: (id: string) => call<WebLinkPreview>('get_web_link_preview', { id }),
+  fetchWebLinkMetadata: (url: string) => call<WebLinkMetadata>('fetch_web_link_metadata', { url }),
+  getWebLinkThumbnail: (id: string) => call<string | null>('get_web_link_thumbnail', { id }),
   openExternalUrl: (url: string) => call<void>('open_external_url', { url }),
 
   createPage: (webLinkId: string, title: string) =>
     call<PageView>('create_page', { webLinkId, title }),
   createKnowledgePage: (title: string, bodyMarkdown?: string) =>
     call<PageView>('create_knowledge_page', { title, bodyMarkdown }),
-  listKnowledgePages: (cursor?: string) =>
-    call<ResultPage<KnowledgePageSummary>>('list_knowledge_pages', { cursor }),
+  listKnowledgePages: (cursor?: string, sort?: CollectionSort) =>
+    call<ResultPage<KnowledgePageSummary>>('list_knowledge_pages', { cursor, sort }),
   getPage: (id: string) => call<PageView>('get_page', { id }),
   getPagePreview: (id: string) => call<string | null>('get_page_preview', { id }),
   savePage: (id: string, markdown: string, expectedRevision: number) =>

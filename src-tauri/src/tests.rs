@@ -8,7 +8,7 @@ use crate::db::{DbManager, OBOROMI_APPLICATION_ID, OBOROMI_USER_VERSION};
 use crate::error::AppError;
 use crate::markdown::{extract_search_text, render_markdown_preview};
 use crate::models::{
-    CreateWebLinkInput, MatchedField, PageKind, SearchKind, SearchSort, TrashKind,
+    CollectionSort, CreateWebLinkInput, MatchedField, PageKind, SearchKind, SearchSort, TrashKind,
     UpdateWebLinkPatch,
 };
 use crate::normalize::{normalize_search_key, prefix_upper_bound, validate_and_normalize_url};
@@ -37,6 +37,94 @@ fn test_normalization_and_prefix_bounds() {
 
     assert!(validate_and_normalize_url("javascript:alert(1)").is_err());
     assert!(validate_and_normalize_url("https://example.com/\nfoo").is_err());
+}
+
+#[test]
+fn test_collection_sort_orders_before_paginating_with_equal_keys() {
+    let (_dir, db) = open_temp_db();
+    for index in 0..35 {
+        let title = if index == 0 { "Ｚｅｂｒａ" } else if index == 34 { "apple" } else { "同じタイトル" };
+        service::create_web_link(&db, CreateWebLinkInput {
+            url: format!("https://collection.example/{index}"),
+            title: title.into(), description: String::new(), thumbnail: None,
+        }, false).unwrap();
+        service::create_knowledge_page(&db, title, Some("# 本文の抜粋")).unwrap();
+    }
+
+    let first = service::list_web_links(&db, None, CollectionSort::TitleAsc).unwrap();
+    assert_eq!(first.items[0].display_title, "apple");
+    assert_eq!(first.items[1].display_title, "Ｚｅｂｒａ");
+    assert_eq!(first.items.len(), 30);
+    let cursor = first.next_cursor.as_deref().unwrap();
+    assert!(service::list_web_links(&db, Some(cursor), CollectionSort::CreatedDesc).is_err());
+    let second = service::list_web_links(&db, Some(cursor), CollectionSort::TitleAsc).unwrap();
+    assert_eq!(second.items.len(), 5);
+    assert!(second.next_cursor.is_none());
+    let ids: HashSet<_> = first.items.iter().chain(&second.items).map(|item| &item.id).collect();
+    assert_eq!(ids.len(), 35);
+    assert!(first.items[29].id < second.items[0].id);
+
+    let latest = service::list_web_links(&db, None, CollectionSort::CreatedDesc).unwrap();
+    assert!(latest.items.windows(2).all(|pair| pair[0].created_at_ms >= pair[1].created_at_ms));
+    let oldest = service::list_web_links(&db, None, CollectionSort::CreatedAsc).unwrap();
+    assert!(oldest.items.windows(2).all(|pair| pair[0].created_at_ms <= pair[1].created_at_ms));
+
+    let first = service::list_knowledge_pages(&db, None, CollectionSort::TitleDesc).unwrap();
+    let second = service::list_knowledge_pages(&db, first.next_cursor.as_deref(), CollectionSort::TitleDesc).unwrap();
+    assert_eq!(second.items.last().unwrap().display_title, "apple");
+    assert_eq!(second.items[0].excerpt.trim(), "本文の抜粋");
+}
+
+#[test]
+fn test_thumbnail_is_restored_from_backup_and_cleared_on_url_change() {
+    let (_dir, db) = open_temp_db();
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut bytes).encode_image(&image::RgbImage::new(16, 9)).unwrap();
+    let thumbnail = crate::web_metadata::thumbnail_data_url(&bytes);
+    let link = service::create_web_link(&db, CreateWebLinkInput {
+        url: "https://example.org/one".into(), title: "サムネイル付きリンク".into(),
+        description: String::new(), thumbnail: Some(thumbnail.clone()),
+    }, false).unwrap();
+    assert!(link.has_thumbnail);
+    assert_eq!(service::get_web_link_thumbnail(&db, &link.id).unwrap().as_deref(), Some(thumbnail.as_str()));
+    let backup = db.create_backup(None).unwrap();
+
+    let updated = service::update_web_link(&db, &link.id, UpdateWebLinkPatch {
+        url: Some("https://example.org/two".into()), title: None, description: None, thumbnail: None,
+    }, false).unwrap();
+    assert!(!updated.has_thumbnail);
+    assert!(service::get_web_link_thumbnail(&db, &link.id).unwrap().is_none());
+
+    db.restore_backup(&backup.path).unwrap();
+    assert_eq!(service::get_web_link_thumbnail(&db, &link.id).unwrap().as_deref(), Some(thumbnail.as_str()));
+}
+
+#[test]
+fn test_v3_library_and_backup_are_migrated() {
+    let (dir, db) = open_temp_db();
+    let link = service::create_web_link(&db, CreateWebLinkInput {
+        url: "https://example.org/legacy".into(), title: "以前のリンク".into(),
+        description: String::new(), thumbnail: None,
+    }, false).unwrap();
+    let backup = db.create_backup(None).unwrap();
+    let path = db.db_path().to_owned();
+    drop(db);
+
+    for path in [path.as_path(), std::path::Path::new(&backup.path)] {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("DROP TABLE web_link_thumbnails;
+            DROP INDEX idx_web_links_active_created;
+            DROP INDEX idx_pages_knowledge_active_created;
+            PRAGMA user_version = 3;").unwrap();
+    }
+
+    let db = DbManager::open(dir.path().to_path_buf(), false).unwrap();
+    assert_eq!(service::get_web_link(&db, &link.id).unwrap(), link);
+    db.restore_backup(&backup.path).unwrap();
+    assert_eq!(service::get_web_link(&db, &link.id).unwrap(), link);
+    let version = rusqlite::Connection::open(&backup.path).unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0)).unwrap();
+    assert_eq!(version, 3);
 }
 
 #[test]
@@ -97,6 +185,7 @@ fn test_at04_attached_pages_reorder_and_persistence() {
             url: "https://example.org/docs".into(),
             title: "Example Docs".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -134,6 +223,7 @@ fn test_at05_at06_tags_and_and_filtering() {
             url: "https://doc.rust-lang.org/".into(),
             title: "Rust Doc".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -192,6 +282,7 @@ fn test_at07_at08_url_normalization_and_duplicates() {
             url: "https://EXAMPLE.com:443".into(),
             title: "First".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -203,6 +294,7 @@ fn test_at07_at08_url_normalization_and_duplicates() {
             url: "https://example.com/".into(),
             title: "Second".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -221,6 +313,7 @@ fn test_at07_at08_url_normalization_and_duplicates() {
             url: "https://example.com/".into(),
             title: "Second".into(),
             description: "".into(),
+            thumbnail: None,
         },
         true,
     )
@@ -234,6 +327,7 @@ fn test_at07_at08_url_normalization_and_duplicates() {
             url: "https://example.com/?a=1#top".into(),
             title: "WithQuery".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -247,6 +341,7 @@ fn test_at07_at08_url_normalization_and_duplicates() {
             url: Some("https://example.com:443/".into()),
             title: Some("First Renamed".into()),
             description: None,
+            thumbnail: None,
         },
         false,
     )
@@ -261,6 +356,7 @@ fn test_at07_at08_url_normalization_and_duplicates() {
             url: Some("https://example.com/".into()),
             title: None,
             description: None,
+            thumbnail: None,
         },
         false,
     )
@@ -285,6 +381,7 @@ fn test_at09_at10_at11_at12_search_ranking_fts5_and_paging() {
             url: "https://notes.example.jp/guide".into(),
             title: "日本語の検索ガイド".into(),
             description: "引用符\"テスト\"とアスタリスク*記号*".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -341,6 +438,7 @@ fn test_at09_at10_at11_at12_search_ranking_fts5_and_paging() {
                 url: format!("https://batch.example.com/{i}"),
                 title: format!("バッチ項目{i:02}"),
                 description: "".into(),
+                thumbnail: None,
             },
             false,
         )
@@ -355,6 +453,7 @@ fn test_at09_at10_at11_at12_search_ranking_fts5_and_paging() {
             url: "https://exact.example.com/".into(),
             title: "ターゲット語句".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -397,6 +496,7 @@ fn test_at09_at10_at11_at12_search_ranking_fts5_and_paging() {
             url: None,
             title: Some("改名後の親タイトル".into()),
             description: None,
+            thumbnail: None,
         },
         false,
     )
@@ -427,6 +527,7 @@ fn test_at13_trash_hierarchy_and_tag_counts() {
             url: "https://trash-test.example/".into(),
             title: "親リンク".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -562,6 +663,7 @@ fn test_at19_at20_at21_backup_restore_and_rebuild() {
             url: "https://backup.example/".into(),
             title: "元のリンク".into(),
             description: "元の説明".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -573,6 +675,7 @@ fn test_at19_at20_at21_backup_restore_and_rebuild() {
             url: "https://deleted.example/".into(),
             title: "削除済みリンク".into(),
             description: "".into(),
+            thumbnail: None,
         },
         false,
     )
@@ -599,6 +702,7 @@ fn test_at19_at20_at21_backup_restore_and_rebuild() {
             url: None,
             title: Some("変更後のリンク".into()),
             description: None,
+            thumbnail: None,
         },
         false,
     )
@@ -1052,10 +1156,10 @@ fn test_knowledge_page_lifecycle_search_trash_and_export() {
     for i in 0..33 {
         service::create_knowledge_page(&db, &format!("ページ{i:02}"), None).unwrap();
     }
-    let page1 = service::list_knowledge_pages(&db, None).unwrap();
+    let page1 = service::list_knowledge_pages(&db, None, Default::default()).unwrap();
     assert_eq!(page1.items.len(), 30);
     assert!(page1.next_cursor.is_some());
-    let page2 = service::list_knowledge_pages(&db, page1.next_cursor.as_deref()).unwrap();
+    let page2 = service::list_knowledge_pages(&db, page1.next_cursor.as_deref(), Default::default()).unwrap();
     assert_eq!(page2.items.len(), 5);
     assert!(page2.next_cursor.is_none());
     let unique_ids: HashSet<String> = page1

@@ -68,7 +68,7 @@ UIからは型付きのTauri IPCで操作を呼び出し、Rustが検証と永�
 
 ## 5. SQLiteの正本
 
-日時はUTCのUnix epochミリ秒、日記日付は`YYYY-MM-DD`。Rustで実在する暦日を検証する。通常接続では外部キーを有効化し、WALと`synchronous=FULL`で保存する。詳細や一覧の読み取り、検索、書き込みは別の接続を使う。複数のSQL文を使う読み取りは同じスナップショットを参照し、書き込みは直列に処理する。新規DBは第5章と第6.3節のDDLをスキーマ3として適用する。
+日時はUTCのUnix epochミリ秒、日記日付は`YYYY-MM-DD`。Rustで実在する暦日を検証する。通常接続では外部キーを有効化し、WALと`synchronous=FULL`で保存する。詳細や一覧の読み取り、検索、書き込みは別の接続を使う。複数のSQL文を使う読み取りは同じスナップショットを参照し、書き込みは直列に処理する。新規DBは第5章と第6.3節のDDLをスキーマ4として適用する。
 
 ```sql
 CREATE TABLE web_links (
@@ -85,6 +85,12 @@ CREATE INDEX idx_web_links_active_url
     ON web_links(normalized_url) WHERE deleted_at_ms IS NULL;
 CREATE INDEX idx_web_links_active_updated
     ON web_links(updated_at_ms DESC, id) WHERE deleted_at_ms IS NULL;
+CREATE INDEX idx_web_links_active_created
+    ON web_links(created_at_ms DESC, id) WHERE deleted_at_ms IS NULL;
+CREATE TABLE web_link_thumbnails (
+    web_link_id TEXT PRIMARY KEY NOT NULL REFERENCES web_links(id) ON DELETE CASCADE,
+    jpeg BLOB NOT NULL CHECK (length(jpeg) BETWEEN 4 AND 262144)
+);
 
 CREATE TABLE pages (
     id            TEXT PRIMARY KEY NOT NULL,
@@ -108,6 +114,9 @@ CREATE TABLE pages (
 CREATE INDEX idx_pages_web_link_position ON pages(web_link_id, position, id);
 CREATE INDEX idx_pages_knowledge_active_updated
     ON pages(updated_at_ms DESC, id)
+    WHERE web_link_id IS NULL AND diary_date IS NULL AND deleted_at_ms IS NULL;
+CREATE INDEX idx_pages_knowledge_active_created
+    ON pages(created_at_ms DESC, id)
     WHERE web_link_id IS NULL AND diary_date IS NULL AND deleted_at_ms IS NULL;
 
 CREATE TABLE tags (
@@ -136,7 +145,8 @@ CREATE INDEX idx_page_tags_tag ON page_tags(tag_id, page_id);
 - `url::Url`の直列化結果を`normalized_url`に保存する。この結果はスキームとホストの大小文字、既定ポート、空パスの`/`などを正規化する。クエリのパラメータと順序、フラグメントは保持する。`http`と`https`は別のURLとして扱う。
 - 新規登録と、比較キーが変わる更新では、有効なリンクから同じ`normalized_url`を検索する。更新対象自身は候補から除く。候補があれば「既存項目を開く」「別件として保存」を表示し、その間はフォームの入力を保持する。保存コマンドは同じ判定をトランザクション内でも行う。
 - Webリンクと付属ページのタイトルは前後の空白を除いて保存する。空欄のWebリンクは正規化したURLのホスト名、空欄の付属ページは「無題」、日記は`YYYY-MM-DDの日記`と表示する。検索用タイトルにも同じ表示値を使う。
-- 既定ブラウザで開くときはRust側で起動対象を再検証し、正規化したURLを渡す。URL登録時のタイトルや説明は利用者が入力する。
+- Webリンク登録時は、公開URLからOpen GraphなどのメタデータとHTMLタイトルを取得し、タイトル・説明を補完する。YouTubeの動画は公開oEmbed情報を使う。フォームで手入力した内容を優先する。取得したサムネイルは最大640×480pxのJPEGとして同じDBに保存する。URL変更時は変更先の画像に差し替えるか、画像なしで表示する。
+- 既定ブラウザで開くときはRust側で起動対象を再検証し、正規化したURLを渡す。
 
 ### 5.2 タグ
 
@@ -229,7 +239,7 @@ BEGIN
 END;
 ```
 
-新規作成時に`PRAGMA application_id = 0x4F42524D`と`PRAGMA user_version = 3`を設定する。派生行はRustが正本と同一トランザクションで更新し、FTS5への反映は上記トリガーで行う。派生行の更新では内部の`id`を維持する。
+新規作成時に`PRAGMA application_id = 0x4F42524D`と`PRAGMA user_version = 4`を設定する。派生行はRustが正本と同一トランザクションで更新し、FTS5への反映は上記トリガーで行う。派生行の更新では内部の`id`を維持する。
 
 - 親リンクの表示タイトルが変わった場合は、配下の有効ページの`parent_title_key`も更新する。リンクの削除・復元時は、配下のページも第4章の表示条件に従って同期する。
 - タグ名とタグ付与の照合は正本を参照する。タグ付与で対象の更新日時が変わった場合は、派生行の更新日時も同期する。
@@ -290,9 +300,10 @@ Windowsのリリースモードで、AMD Ryzen 7 9700Xを使用して検索サ�
 
 ### 7.3 Webリンク・付属ページ・ナレッジ・タグ
 
-- リンク一覧は更新順。詳細にURL、説明、直接付与したタグ、付属ページを表示する。主要操作は「ブラウザで開く」「編集」「ページを追加」。リンクのURL・タイトル・説明はフォームの「保存」で確定する。
+- Webリンクとナレッジの一覧は、受信箱（一覧と詳細の2ペイン）、リスト、ギャラリー、テーブルから選べる。初期表示はギャラリー。更新日時・作成日時・タイトルで昇順または降順を選び、選択は一覧ごとに端末へ保存する。並び替えは全件に適用してからページングする。
+- Webリンクのギャラリーにはタイトル、サムネイル、リンク先、タグを表示する。詳細ではURL、説明、タグ、付属ページにもアクセスできる。主要操作は「ブラウザで開く」「編集」「ページを追加」。リンクのURL・タイトル・説明はフォームの「追加」または「保存」で確定する。
 - 付属ページは各ページの詳細で編集・改名・タグ付与を行い、親リンクの一覧で順序を変更する。
-- ナレッジは独立した一覧に更新順で表示し、詳細で本文編集・改名・タグ付与を行う。付属ページとナレッジは見出しをクリックして改名できる。
+- ナレッジのギャラリーには本文の抜粋を表示し、詳細で本文編集・改名・タグ付与を行う。付属ページとナレッジは見出しをクリックして改名できる。
 - タグ画面はタグごとの付与件数を示し、タグチップを複数選んで対象を絞り込める。ページ側に付けたタグはページの詳細に表示する。
 - 詳細の「タグを追加」はタグ選択ダイアログを開く。タグ名で絞り込み、既存タグを複数選んで適用できる。検索した名前でタグを作成して適用することもできる。
 - リンク・付属ページは確認後にごみ箱へ移す。親リンクが削除中の場合は、ごみ箱に親リンクを表示し、親の復元後に個別で削除済みの子ページを復元できるようにする。
@@ -333,14 +344,16 @@ list_diary_dates(year, month) -> string[]
 create_web_link(input, allowDuplicate = false) -> WebLinkDetail
 update_web_link(id, patch, allowDuplicate = false) -> WebLinkDetail
 find_web_link_duplicates(url, excludeId?) -> WebLinkSummary[]
-list_web_links(cursor?) -> ResultPage<WebLinkSummary>
+list_web_links(cursor?, sort?) -> ResultPage<WebLinkSummary>
 get_web_link(id) -> WebLinkDetail
 get_web_link_preview(id) -> { url, description, pageCount }
+fetch_web_link_metadata(url) -> { title, description, thumbnail }
+get_web_link_thumbnail(id) -> string | null
 open_external_url(url) -> void
 
 create_page(webLinkId, title) -> PageView
 create_knowledge_page(title, bodyMarkdown?) -> PageView
-list_knowledge_pages(cursor?) -> ResultPage<KnowledgePageSummary>
+list_knowledge_pages(cursor?, sort?) -> ResultPage<KnowledgePageSummary>
 get_page(id) -> PageView
 get_page_preview(id) -> string | null
 save_page(id, markdown, expectedRevision) -> SaveReceipt
@@ -405,14 +418,14 @@ type SaveReceipt = { pageId: string; revision: number; updatedAtMs: number }
   backups\
 ```
 
-- 起動、登録、編集、検索、バックアップ、復元、書き出しはオフラインで完結する。アプリ内で読み込むアセットは同梱する。リンク先へのアクセスは利用者が既定ブラウザで開く操作に委ねる。
+- 起動、登録、編集、検索、バックアップ、復元、書き出しはオフラインでも行える。Webリンクの登録・情報取得ではRustが公開URLにアクセスし、接続先と応答サイズを確認する。取得できないときは手入力で保存できる。保存済み画像はDBから表示する。
 - Windows上のデータディレクトリはTauriのローカルデータパスから解決し、設定画面に表示する。DB・検索インデックス・WAL・バックアップは平文で保存する。ログには操作名とエラー種別を記録し、本文・検索語・URLは含めない。
 - データディレクトリを使用するアプリのインスタンスは`instance.lock`の排他ロックにより1つに制限する。
 - ウィンドウを閉じる際の保存待機（`onCloseRequested`）には`core:window:allow-close`および`core:window:allow-destroy`権限を付与する。またWebView2上でMilkdownのブロック並び替え（HTML5ドラッグ＆ドロップ）を有効にするため、`tauri.conf.json`で`dragDropEnabled: false`を設定する。
 
 ### 10.2 初期化と形式の検証
 
-- 初回起動時はTauriのアプリ別データディレクトリにスキーマ3のライブラリを作成する。既存DBを開くときは`application_id`と`user_version`で現行形式を確認する。
+- 初回起動時はTauriのアプリ別データディレクトリにスキーマ4のライブラリを作成する。スキーマ3の既存DBは開くときに移行する。スキーマ3のバックアップは作業用コピーを移行してから復元する。
 - 開けないDBや対応外のDBでは、ファイルを保持し、エラーと保存場所を表示する。復元と検索テーブルの再構築の間は通常のデータ操作を止める。
 
 ### 10.3 手動バックアップと復元

@@ -1,6 +1,7 @@
 export type PageKind = 'attached_page' | 'knowledge_page' | 'diary';
 export type SearchKind = 'web_link' | 'attached_page' | 'knowledge_page' | 'diary';
 export type SearchSort = 'relevance' | 'updated';
+export type CollectionSort = 'updated_desc' | 'updated_asc' | 'created_desc' | 'created_asc' | 'title_asc' | 'title_desc';
 export type MatchedField =
   | 'title'
   | 'url'
@@ -44,6 +45,8 @@ export interface KnowledgePageSummary {
   revision: number;
   createdAtMs: number;
   updatedAtMs: number;
+  excerpt: string;
+  tags: Tag[];
 }
 
 export interface WebLinkSummary {
@@ -55,19 +58,18 @@ export interface WebLinkSummary {
   description: string;
   createdAtMs: number;
   updatedAtMs: number;
+  hasThumbnail: boolean;
+  tags: Tag[];
 }
 
-export interface WebLinkDetail {
-  id: string;
-  url: string;
-  normalizedUrl: string;
-  title: string;
-  displayTitle: string;
-  description: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  tags: Tag[];
+export interface WebLinkDetail extends WebLinkSummary {
   pages: PageSummary[];
+}
+
+export interface WebLinkMetadata {
+  title: string | null;
+  description: string | null;
+  thumbnail: string | null;
 }
 
 export interface WebLinkPreview {

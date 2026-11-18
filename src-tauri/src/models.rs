@@ -45,6 +45,8 @@ pub struct KnowledgePageSummary {
     pub revision: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub excerpt: String,
+    pub tags: Vec<Tag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub struct WebLinkSummary {
     pub description: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub has_thumbnail: bool,
+    pub tags: Vec<Tag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,8 +75,17 @@ pub struct WebLinkDetail {
     pub description: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub has_thumbnail: bool,
     pub tags: Vec<Tag>,
     pub pages: Vec<PageSummary>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebLinkMetadata {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub thumbnail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,6 +222,7 @@ pub struct CreateWebLinkInput {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    pub thumbnail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +231,19 @@ pub struct UpdateWebLinkPatch {
     pub url: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub thumbnail: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionSort {
+    #[default]
+    UpdatedDesc,
+    UpdatedAsc,
+    CreatedDesc,
+    CreatedAsc,
+    TitleAsc,
+    TitleDesc,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

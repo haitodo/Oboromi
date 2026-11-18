@@ -4,6 +4,7 @@ pub mod markdown;
 pub mod models;
 pub mod normalize;
 pub mod service;
+mod web_metadata;
 
 #[cfg(test)]
 mod tests;
@@ -16,9 +17,9 @@ use tauri::{Manager, State};
 use crate::db::DbManager;
 use crate::error::AppError;
 use crate::models::{
-    AppStatus, BackupInfo, CreateWebLinkInput, KnowledgePageSummary, PageView, RestoreInfo,
+    AppStatus, BackupInfo, CollectionSort, CreateWebLinkInput, KnowledgePageSummary, PageView, RestoreInfo,
     ResultPage, SaveReceipt, SearchHit, SearchKind, SearchSort, Tag, TagSummary, TrashEntry,
-    UpdateWebLinkPatch, WebLinkDetail, WebLinkPreview, WebLinkSummary,
+    UpdateWebLinkPatch, WebLinkDetail, WebLinkMetadata, WebLinkPreview, WebLinkSummary,
 };
 
 struct AppState {
@@ -155,9 +156,10 @@ async fn find_web_link_duplicates(
 async fn list_web_links(
     state: State<'_, Arc<AppState>>,
     cursor: Option<String>,
+    sort: Option<CollectionSort>,
 ) -> Result<ResultPage<WebLinkSummary>, AppError> {
     with_db(state, "list_web_links", move |db| {
-        service::list_web_links(db, cursor.as_deref())
+        service::list_web_links(db, cursor.as_deref(), sort.unwrap_or_default())
     })
     .await
 }
@@ -182,6 +184,19 @@ async fn get_web_link_preview(
         service::get_web_link_preview(db, &id)
     })
     .await
+}
+
+#[tauri::command]
+async fn fetch_web_link_metadata(url: String) -> Result<WebLinkMetadata, AppError> {
+    web_metadata::fetch(&url).await
+}
+
+#[tauri::command]
+async fn get_web_link_thumbnail(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Option<String>, AppError> {
+    with_db(state, "get_web_link_thumbnail", move |db| service::get_web_link_thumbnail(db, &id)).await
 }
 
 #[tauri::command]
@@ -220,9 +235,10 @@ async fn create_knowledge_page(
 async fn list_knowledge_pages(
     state: State<'_, Arc<AppState>>,
     cursor: Option<String>,
+    sort: Option<CollectionSort>,
 ) -> Result<ResultPage<KnowledgePageSummary>, AppError> {
     with_db(state, "list_knowledge_pages", move |db| {
-        service::list_knowledge_pages(db, cursor.as_deref())
+        service::list_knowledge_pages(db, cursor.as_deref(), sort.unwrap_or_default())
     })
     .await
 }
@@ -459,6 +475,8 @@ pub fn run() {
             list_web_links,
             get_web_link,
             get_web_link_preview,
+            fetch_web_link_metadata,
+            get_web_link_thumbnail,
             open_external_url,
             create_page,
             create_knowledge_page,

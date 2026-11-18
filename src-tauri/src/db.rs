@@ -18,8 +18,19 @@ use crate::normalize::{
 };
 
 pub const OBOROMI_APPLICATION_ID: i32 = 0x4F42_524D; // "OBRM"
-pub const OBOROMI_USER_VERSION: i32 = 3;
+pub const OBOROMI_USER_VERSION: i32 = 4;
 const CORE_TABLES: [&str; 5] = ["web_links", "pages", "tags", "web_link_tags", "page_tags"];
+const V4_LIBRARY_SCHEMA_SQL: &str = "
+CREATE TABLE web_link_thumbnails (
+    web_link_id TEXT PRIMARY KEY NOT NULL REFERENCES web_links(id) ON DELETE CASCADE,
+    jpeg BLOB NOT NULL CHECK (length(jpeg) BETWEEN 4 AND 262144)
+);
+CREATE INDEX idx_web_links_active_created
+    ON web_links(created_at_ms DESC, id) WHERE deleted_at_ms IS NULL;
+CREATE INDEX idx_pages_knowledge_active_created
+    ON pages(created_at_ms DESC, id)
+    WHERE web_link_id IS NULL AND diary_date IS NULL AND deleted_at_ms IS NULL;
+";
 
 // Fetch match fields and ordering keys for an FTS row without reading its body.
 const SEARCH_MATCH_INDEX_SQL: &str = "
@@ -275,6 +286,7 @@ impl DbManager {
             if !has_objects {
                 let tx = conn.transaction()?;
                 tx.execute_batch(LIBRARY_SCHEMA_SQL)?;
+                tx.execute_batch(V4_LIBRARY_SCHEMA_SQL)?;
                 create_search_schema(&tx)?;
                 tx.pragma_update(None, "application_id", OBOROMI_APPLICATION_ID)?;
                 tx.pragma_update(None, "user_version", OBOROMI_USER_VERSION)?;
@@ -284,8 +296,8 @@ impl DbManager {
         }
 
         Self::validate_header(application_id, version)?;
-        Self::require_tables(conn, &CORE_TABLES)?;
-        Self::require_tables(conn, &["search_documents", "search_fts"])
+        Self::require_tables(conn, &["search_documents", "search_fts"])?;
+        Self::migrate_library(conn, version)
     }
 
     fn read_header(conn: &Connection) -> Result<(i32, i32), AppError> {
@@ -299,12 +311,23 @@ impl DbManager {
         if application_id != OBOROMI_APPLICATION_ID {
             return Err(AppError::IncompatibleBackup("Oboromiのデータベース形式ではありません".into()));
         }
-        if version != OBOROMI_USER_VERSION {
+        if version != 3 && version != OBOROMI_USER_VERSION {
             return Err(AppError::IncompatibleBackup(format!(
                 "このバージョンのOboromiでは開けないデータベースです (user_version={version})"
             )));
         }
         Ok(())
+    }
+
+    fn migrate_library(conn: &mut Connection, version: i32) -> Result<(), AppError> {
+        Self::require_tables(conn, &CORE_TABLES)?;
+        if version == 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(V4_LIBRARY_SCHEMA_SQL)?;
+            tx.pragma_update(None, "user_version", OBOROMI_USER_VERSION)?;
+            tx.commit()?;
+        }
+        Self::require_tables(conn, &["web_link_thumbnails"])
     }
 
     fn require_tables(conn: &Connection, tables: &[&str]) -> Result<(), AppError> {
@@ -668,7 +691,7 @@ impl DbManager {
         let (application_id, version) = Self::read_header(&work_conn)
             .map_err(|e| AppError::IncompatibleBackup(format!("ヘッダ検証に失敗しました: {e}")))?;
         Self::validate_header(application_id, version)?;
-        Self::require_tables(&work_conn, &CORE_TABLES)?;
+        Self::migrate_library(&mut work_conn, version)?;
 
         let integrity_rows: Vec<String> = {
             let mut stmt = work_conn.prepare("PRAGMA integrity_check")?;

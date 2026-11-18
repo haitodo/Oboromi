@@ -3,7 +3,8 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import logo from '../src-tauri/icons/128x128.png?url';
   import { api, normalizeError } from './lib/api';
-  import { createCollection } from './lib/collection';
+  import { createCollection, readCollectionPreferences } from './lib/collection';
+  import type { CollectionKind, CollectionLayout, CollectionPreferences } from './lib/collection';
   import { currentJstDate, formatDiaryDate, formatDiaryWeekday, formatTimestamp, parseYmd, shiftYearMonth, shiftYmd } from './lib/jst';
   import { isShortQuery, searchKindOptions, searchKinds } from './lib/search';
   import CollectionList from './lib/CollectionList.svelte';
@@ -17,7 +18,8 @@
   import TagEditor from './lib/TagEditor.svelte';
   import TagPickerModal from './lib/TagPickerModal.svelte';
   import WebLinkModal from './lib/WebLinkModal.svelte';
-  import type { AppStatus, PageView, SaveReceipt, SearchHit, SearchKind, SearchSort, TagSummary, WebLinkDetail } from './lib/types';
+  import WebLinkThumbnail from './lib/WebLinkThumbnail.svelte';
+  import type { AppStatus, CollectionSort, PageView, SaveReceipt, SearchHit, SearchKind, SearchSort, TagSummary, WebLinkDetail } from './lib/types';
 
   type Section = 'diary' | 'web_links' | 'knowledge' | 'tags';
   type EditablePage = Omit<PageView, 'createdAtMs'>;
@@ -47,6 +49,7 @@
   let section: Section = 'diary';
   let view: View = { kind: 'empty' };
   let beforeSettings: Target | undefined;
+  let detailBeforeSettings = false;
   let dialog: Dialog | null = null;
   let editor: DocumentEditor | null = null;
   let detailRequest = 0;
@@ -75,8 +78,12 @@
   let calendarLoading = false;
   let calendarError = '';
 
-  const links = createCollection(api.listWebLinks);
-  const knowledge = createCollection(api.listKnowledgePages);
+  let collectionPreferences = {
+    web_links: readCollectionPreferences('web_links'),
+    knowledge: readCollectionPreferences('knowledge'),
+  };
+  const links = createCollection((cursor) => api.listWebLinks(cursor, collectionPreferences.web_links.sort));
+  const knowledge = createCollection((cursor) => api.listKnowledgePages(cursor, collectionPreferences.knowledge.sort));
   let addingAttached = false;
   let attachedTitle = '';
   let reordering = false;
@@ -114,6 +121,7 @@
   $: unavailable = !appStatus || Boolean(appStatus.startupError);
   $: blocked = unavailable || settingsBusy || deleting;
   $: isMultiPane = width >= 760;
+  $: collectionWorkspace = isCollection(section) && collectionPreferences[section].layout !== 'inbox';
   $: drawerVisible = drawerOpen && width < 1000;
   $: documentPage = view.kind === 'page' || view.kind === 'diary' ? view.page : null;
   $: tagRecord = view.kind === 'web_link' ? view.link : documentPage;
@@ -263,11 +271,12 @@
         ensureTags();
         void tagResults.load();
       }
-      if (!isMultiPane && !showDetail) {
+      const fullCollection = isCollection(nextSection) && collectionPreferences[nextSection].layout !== 'inbox';
+      if ((!isMultiPane || fullCollection) && !showDetail) {
         await tick();
         if (request === detailRequest) middlePane.scrollTop = listScroll;
       }
-      if (showDetail && (!isMultiPane || focusHeading)) {
+      if (showDetail && (!isMultiPane || fullCollection || focusHeading)) {
         await tick();
         if (request === detailRequest) detailPane.querySelector<HTMLElement>(isMultiPane ? 'h1' : '.mobile-back-btn')?.focus();
       }
@@ -289,13 +298,38 @@
     await navigate(target, next, false);
   }
 
+  function isCollection(value: Section): value is CollectionKind {
+    return value === 'web_links' || value === 'knowledge';
+  }
+
+  function storeCollectionPreferences(kind: CollectionKind, preferences: CollectionPreferences) {
+    collectionPreferences = { ...collectionPreferences, [kind]: preferences };
+    try { localStorage.setItem(`oboromi-collection-${kind}`, JSON.stringify(preferences)); } catch { /* Keep the session preference. */ }
+  }
+
+  async function changeCollectionLayout(kind: CollectionKind, layout: CollectionLayout) {
+    if (collectionPreferences[kind].layout === layout) return;
+    if (layout !== 'inbox' && (mobileDetail || editor) && !(await navigate(currentTarget(), kind, false))) return;
+    storeCollectionPreferences(kind, { ...collectionPreferences[kind], layout });
+    middlePane.scrollTop = 0;
+  }
+
+  function changeCollectionSort(kind: CollectionKind, sort: CollectionSort) {
+    storeCollectionPreferences(kind, { ...collectionPreferences[kind], sort });
+    const collection = kind === 'web_links' ? links : knowledge;
+    collection.invalidate();
+    middlePane.scrollTop = 0;
+    void collection.load();
+  }
+
   async function showList() {
     if (view.kind === 'settings' && !unavailable) {
       await closeSettings();
       return;
     }
     if (await navigate(currentTarget(), section, false)) {
-      listFocus?.focus();
+      const focus = listFocus?.isConnected ? listFocus : middlePane.querySelector<HTMLElement>('[aria-current="true"], h1');
+      focus?.focus({ preventScroll: true });
     }
   }
 
@@ -312,11 +346,15 @@
       return;
     }
     const previous = currentTarget();
-    if (await navigate({ kind: 'settings' })) beforeSettings = previous;
+    const showingDetail = mobileDetail;
+    if (await navigate({ kind: 'settings' })) {
+      beforeSettings = previous;
+      detailBeforeSettings = showingDetail;
+    }
   }
 
   function closeSettings() {
-    return navigate(beforeSettings ?? (section === 'diary' ? { kind: 'diary', date: selectedDate } : { kind: 'empty' }), section, false);
+    return navigate(beforeSettings ?? (section === 'diary' ? { kind: 'diary', date: selectedDate } : { kind: 'empty' }), section, detailBeforeSettings);
   }
 
   async function loadCalendar() {
@@ -603,6 +641,10 @@
         syncTagInView(tag.id);
       }
       await loadTags();
+      if (action !== 'create') {
+        links.refresh();
+        knowledge.refresh();
+      }
       scheduleTagSearch(true);
     } catch (error) {
       tagError = normalizeError(error).message;
@@ -830,7 +872,7 @@
             <Icon name="settings" size={16} /> <span class="breadcrumb-root">設定</span>
           {:else}
             <Icon name={sections[section].icon} size={16} /> <span class="breadcrumb-root">{sections[section].label}</span>
-            {#if viewTitle}
+            {#if viewTitle && (!collectionWorkspace || mobileDetail)}
               <span class="breadcrumb-leaf"><Icon name="right" size={13} /> <span>{viewTitle}</span></span>
             {/if}
           {/if}
@@ -874,7 +916,8 @@
       </div>
     {/if}
 
-    <div class="workspace" class:mobile-detail={mobileDetail} inert={unavailable && view.kind !== 'settings'}>
+    <div class="workspace" class:collection-workspace={collectionWorkspace} class:mobile-detail={mobileDetail}
+      inert={unavailable && view.kind !== 'settings'}>
       <aside class="middle-pane" aria-label={sections[section].label + 'の一覧'} bind:this={middlePane} inert={unavailable || settingsBusy || deleting}>
         {#if section === 'diary'}
           <DiaryCalendar year={month.year} month={month.month} {today} selected={selectedDate} entries={diaryDates}
@@ -883,14 +926,16 @@
             on:month={(event) => moveCalendar(shiftYearMonth(month.year, month.month, event.detail))}
             on:today={() => void openToday()} on:retry={() => void loadCalendar()} />
         {:else if section === 'web_links'}
-          <CollectionList kind="web_links" {...$links}
+          <CollectionList kind="web_links" preferences={collectionPreferences.web_links} {...$links}
             selectedId={view.kind === 'web_link' ? view.link.id : view.kind === 'page' ? view.page.parent?.id : undefined}
             on:select={(event) => void navigate({ kind: 'web_link', id: event.detail })}
+            on:layout={(event) => void changeCollectionLayout('web_links', event.detail)} on:sort={(event) => changeCollectionSort('web_links', event.detail)}
             on:add={() => void openDialog({ kind: 'web_link' })} on:external={(event) => openExternal(event.detail)}
             on:retry={() => void links.load()} on:more={() => void links.load(false)} />
         {:else if section === 'knowledge'}
-          <CollectionList kind="knowledge" {...$knowledge} selectedId={view.kind === 'page' ? view.page.id : undefined}
+          <CollectionList kind="knowledge" preferences={collectionPreferences.knowledge} {...$knowledge} selectedId={view.kind === 'page' ? view.page.id : undefined}
             on:select={(event) => void navigate({ kind: 'page', id: event.detail })}
+            on:layout={(event) => void changeCollectionLayout('knowledge', event.detail)} on:sort={(event) => changeCollectionSort('knowledge', event.detail)}
             on:add={() => void openDialog({ kind: 'knowledge' })} on:retry={() => void knowledge.load()} on:more={() => void knowledge.load(false)} />
         {:else}
           <div class="pane-header"><h2>タグ</h2></div>
@@ -991,9 +1036,8 @@
             {@const link = view.link}
             <article class="detail-container">
               <header class="document-header">
-                <div class="document-context"><span class="row-icon tone-link"><Icon name="link" size={16} /></span> Webリンク</div>
-                <div class="detail-title-row">
-                  <h1 class="detail-title" tabindex="-1">{link.displayTitle}</h1>
+                <div class="document-context document-heading-context">
+                  <div class="document-kind"><span class="row-icon tone-link"><Icon name="link" size={16} /></span> Webリンク</div>
                   <div class="detail-actions">
                     <button type="button" class="primary compact-button open-browser" aria-label="ブラウザで開く" title="ブラウザで開く" on:click={() => openExternal(link.normalizedUrl)}>
                       <Icon name="external" size={15} /> <span>ブラウザで開く</span>
@@ -1005,6 +1049,7 @@
                     </details>
                   </div>
                 </div>
+                <h1 class="detail-title link-title" tabindex="-1">{link.displayTitle}</h1>
                 <dl class="document-properties">
                   <div><dt><Icon name="link" size={15} /> URL</dt><dd class="url-property">
                     <button type="button" class="url-link-btn" on:click={() => openExternal(link.normalizedUrl)} title={link.url}>{link.url}</button>
@@ -1019,6 +1064,7 @@
                 </dl>
               </header>
 
+              {#if link.hasThumbnail}<div class="link-cover"><WebLinkThumbnail saved={link} /></div>{/if}
               {#if link.description}<p class="link-description">{link.description}</p>{/if}
 
               <section class="attached-section" aria-label="付属ページ">
