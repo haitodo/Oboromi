@@ -157,9 +157,10 @@ async fn list_web_links(
     state: State<'_, Arc<AppState>>,
     cursor: Option<String>,
     sort: Option<CollectionSort>,
+    query: Option<String>,
 ) -> Result<ResultPage<WebLinkSummary>, AppError> {
     with_db(state, "list_web_links", move |db| {
-        service::list_web_links(db, cursor.as_deref(), sort.unwrap_or_default())
+        service::list_web_links(db, cursor.as_deref(), sort.unwrap_or_default(), query.as_deref())
     })
     .await
 }
@@ -236,9 +237,10 @@ async fn list_knowledge_pages(
     state: State<'_, Arc<AppState>>,
     cursor: Option<String>,
     sort: Option<CollectionSort>,
+    query: Option<String>,
 ) -> Result<ResultPage<KnowledgePageSummary>, AppError> {
     with_db(state, "list_knowledge_pages", move |db| {
-        service::list_knowledge_pages(db, cursor.as_deref(), sort.unwrap_or_default())
+        service::list_knowledge_pages(db, cursor.as_deref(), sort.unwrap_or_default(), query.as_deref())
     })
     .await
 }

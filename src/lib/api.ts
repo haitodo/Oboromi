@@ -89,8 +89,8 @@ export const api = {
   ) => call<WebLinkDetail>('update_web_link', { id, patch, allowDuplicate }),
   findWebLinkDuplicates: (url: string, excludeId?: string) =>
     call<WebLinkSummary[]>('find_web_link_duplicates', { url, excludeId }),
-  listWebLinks: (cursor?: string, sort?: CollectionSort) =>
-    call<ResultPage<WebLinkSummary>>('list_web_links', { cursor, sort }),
+  listWebLinks: (cursor?: string, sort?: CollectionSort, query?: string) =>
+    call<ResultPage<WebLinkSummary>>('list_web_links', { cursor, sort, query }),
   getWebLink: (id: string) => call<WebLinkDetail>('get_web_link', { id }),
   getWebLinkPreview: (id: string) => call<WebLinkPreview>('get_web_link_preview', { id }),
   fetchWebLinkMetadata: (url: string) => call<WebLinkMetadata>('fetch_web_link_metadata', { url }),
@@ -101,8 +101,8 @@ export const api = {
     call<PageView>('create_page', { webLinkId, title }),
   createKnowledgePage: (title: string, bodyMarkdown?: string) =>
     call<PageView>('create_knowledge_page', { title, bodyMarkdown }),
-  listKnowledgePages: (cursor?: string, sort?: CollectionSort) =>
-    call<ResultPage<KnowledgePageSummary>>('list_knowledge_pages', { cursor, sort }),
+  listKnowledgePages: (cursor?: string, sort?: CollectionSort, query?: string) =>
+    call<ResultPage<KnowledgePageSummary>>('list_knowledge_pages', { cursor, sort, query }),
   getPage: (id: string) => call<PageView>('get_page', { id }),
   getPagePreview: (id: string) => call<string | null>('get_page_preview', { id }),
   savePage: (id: string, markdown: string, expectedRevision: number) =>

@@ -3,10 +3,10 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import logo from '../src-tauri/icons/128x128.png?url';
   import { api, normalizeError } from './lib/api';
-  import { createCollection, readCollectionPreferences } from './lib/collection';
+  import { collectionLayouts, createCollection, readCollectionPreferences } from './lib/collection';
   import type { CollectionKind, CollectionLayout, CollectionPreferences } from './lib/collection';
   import { currentJstDate, formatDiaryDate, formatDiaryWeekday, formatTimestamp, parseYmd, shiftYearMonth, shiftYmd } from './lib/jst';
-  import { isShortQuery, searchKindOptions, searchKinds } from './lib/search';
+  import { isShortQuery, normalizeTagQuery, searchKindOptions, searchKinds } from './lib/search';
   import CollectionList from './lib/CollectionList.svelte';
   import DiaryCalendar from './lib/DiaryCalendar.svelte';
   import DocumentEditor from './lib/DocumentEditor.svelte';
@@ -15,8 +15,10 @@
   import Modal from './lib/Modal.svelte';
   import PaletteModal from './lib/PaletteModal.svelte';
   import SettingsView from './lib/SettingsView.svelte';
+  import TagBrowseButton from './lib/TagBrowseButton.svelte';
   import TagEditor from './lib/TagEditor.svelte';
   import TagPickerModal from './lib/TagPickerModal.svelte';
+  import TagResults from './lib/TagResults.svelte';
   import WebLinkModal from './lib/WebLinkModal.svelte';
   import WebLinkThumbnail from './lib/WebLinkThumbnail.svelte';
   import type { AppStatus, CollectionSort, PageView, SaveReceipt, SearchHit, SearchKind, SearchSort, TagSummary, WebLinkDetail } from './lib/types';
@@ -62,10 +64,11 @@
   let width = window.innerWidth;
   let drawerOpen = false;
   let drawerButton: HTMLButtonElement;
-  let mobileDetail = false;
+  let detailOpen = false;
   let middlePane: HTMLElement;
   let detailPane: HTMLElement;
   let listScroll = 0;
+  let overviewScroll = 0;
   let listFocus: HTMLElement | null = null;
   let newMenu: HTMLDetailsElement | undefined;
   let detailMenu: HTMLDetailsElement | undefined;
@@ -82,8 +85,20 @@
     web_links: readCollectionPreferences('web_links'),
     knowledge: readCollectionPreferences('knowledge'),
   };
-  const links = createCollection((cursor) => api.listWebLinks(cursor, collectionPreferences.web_links.sort));
-  const knowledge = createCollection((cursor) => api.listKnowledgePages(cursor, collectionPreferences.knowledge.sort));
+  let collectionQueries = { web_links: '', knowledge: '' };
+  const collectionTimers: Partial<Record<CollectionKind, ReturnType<typeof setTimeout>>> = {};
+  const collections = {
+    web_links: {
+      inbox: createCollection(api.listWebLinks),
+      items: createCollection((cursor) => api.listWebLinks(cursor, collectionPreferences.web_links.sort, collectionQueries.web_links)),
+    },
+    knowledge: {
+      inbox: createCollection(api.listKnowledgePages),
+      items: createCollection((cursor) => api.listKnowledgePages(cursor, collectionPreferences.knowledge.sort, collectionQueries.knowledge)),
+    },
+  };
+  const { inbox: linkInbox, items: links } = collections.web_links;
+  const { inbox: knowledgeInbox, items: knowledge } = collections.knowledge;
   let addingAttached = false;
   let attachedTitle = '';
   let reordering = false;
@@ -93,13 +108,13 @@
   let renaming = false;
 
   let allTags: TagSummary[] = [];
-  let matchingTags: TagSummary[] = [];
   let tagsLoaded = false;
   let tagListLoading = false;
   let tagListError = '';
   let tagListRequest = 0;
-  let matchingTagsRequest = 0;
   let tagQuery = '';
+  let tagOrder: 'name' | 'count_desc' | 'count_asc' = 'name';
+  let tagLayout: CollectionLayout = 'gallery';
   let tagName = '';
   let tagRename: string | null = null;
   let tagError = '';
@@ -121,15 +136,21 @@
   $: unavailable = !appStatus || Boolean(appStatus.startupError);
   $: blocked = unavailable || settingsBusy || deleting;
   $: isMultiPane = width >= 760;
-  $: collectionWorkspace = isCollection(section) && collectionPreferences[section].layout !== 'inbox';
+  $: splitLibrary = usesSplitLibrary(section);
+  $: showingOverview = splitLibrary && !detailOpen && view.kind !== 'settings';
   $: drawerVisible = drawerOpen && width < 1000;
   $: documentPage = view.kind === 'page' || view.kind === 'diary' ? view.page : null;
   $: tagRecord = view.kind === 'web_link' ? view.link : documentPage;
   $: documentKey = view.kind === 'diary' ? `diary:${view.date}` : view.kind === 'page' ? `page:${view.page.id}` : '';
   $: viewTitle = view.kind === 'diary' ? formatDiaryDate(view.date, false)
     : view.kind === 'page' ? view.page.displayTitle : view.kind === 'web_link' ? view.link.displayTitle : '';
-  $: visibleTags = tagQuery.trim() ? matchingTags : allTags;
-  $: singleTag = tagIds.length === 1 ? allTags.find((tag) => tag.id === tagIds[0]) : undefined;
+  $: selectedItemId = view.kind === 'web_link' ? view.link.id : documentPage?.id;
+  $: selectedLinkId = view.kind === 'web_link' ? view.link.id : view.kind === 'page' ? view.page.parent?.id : undefined;
+  $: tagQueryKey = normalizeTagQuery(tagQuery);
+  $: visibleTags = allTags.filter((tag) => tag.nameKey.includes(tagQueryKey) || normalizeTagQuery(tag.name).includes(tagQueryKey));
+  $: catalogTags = tagOrder === 'name' ? visibleTags : [...visibleTags].sort((a, b) => tagOrder === 'count_desc' ? b.count - a.count : a.count - b.count);
+  $: selectedTags = allTags.filter((tag) => tagIds.includes(tag.id));
+  $: singleTag = selectedTags.length === 1 ? selectedTags[0] : undefined;
   $: document.documentElement.dataset.theme = theme;
 
   onMount(() => {
@@ -163,6 +184,7 @@
       stopped = true;
       unlisten?.();
       clearTimeout(tagTimer);
+      Object.values(collectionTimers).forEach(clearTimeout);
     };
   });
 
@@ -182,7 +204,7 @@
       appStatus = await api.getAppStatus();
       if (appStatus.startupError) {
         view = { kind: 'settings' };
-        mobileDetail = true;
+        detailOpen = true;
         return;
       }
       await Promise.all([
@@ -239,21 +261,26 @@
       if (request !== detailRequest) return false;
 
       const switched = nextSection !== section;
-      const openingFromList = !mobileDetail && showDetail;
+      const openingFromList = !detailOpen && showDetail;
       if (switched) {
         listScroll = 0;
+        overviewScroll = 0;
         listFocus = null;
         middlePane.scrollTop = 0;
       } else if (openingFromList) {
         listScroll = middlePane.scrollTop;
+        overviewScroll = detailPane.scrollTop;
         listFocus = focus && middlePane.contains(focus) ? focus : null;
       }
       section = nextSection;
       view = nextView;
       drawerOpen = false;
-      mobileDetail = showDetail;
-      if (!same) {
+      detailOpen = showDetail;
+      detailLoading = false;
+      if (!same || switched || (openingFromList && usesSplitLibrary(nextSection))) {
         detailPane.scrollTop = 0;
+      }
+      if (!same) {
         attachedTitle = '';
         renameTitle = null;
       }
@@ -265,20 +292,22 @@
           moveCalendar(nextMonth);
         }
       }
-      if (nextSection === 'web_links') links.ensureLoaded();
-      if (nextSection === 'knowledge') knowledge.ensureLoaded();
-      if (nextSection === 'tags' && switched) {
-        ensureTags();
-        void tagResults.load();
+      if (isCollection(nextSection)) {
+        collections[nextSection].inbox.ensureLoaded();
+        collections[nextSection].items.ensureLoaded();
       }
-      const fullCollection = isCollection(nextSection) && collectionPreferences[nextSection].layout !== 'inbox';
-      if ((!isMultiPane || fullCollection) && !showDetail) {
+      if (nextSection === 'tags') ensureTags();
+      const split = usesSplitLibrary(nextSection);
+      if ((!isMultiPane || split) && !showDetail) {
         await tick();
-        if (request === detailRequest) middlePane.scrollTop = listScroll;
+        if (request === detailRequest) {
+          if (split) detailPane.scrollTop = overviewScroll;
+          else middlePane.scrollTop = listScroll;
+        }
       }
-      if (showDetail && (!isMultiPane || fullCollection || focusHeading)) {
+      if (showDetail && (split || !isMultiPane || focusHeading)) {
         await tick();
-        if (request === detailRequest) detailPane.querySelector<HTMLElement>(isMultiPane ? 'h1' : '.mobile-back-btn')?.focus();
+        if (request === detailRequest) detailPane.querySelector<HTMLElement>(split || isMultiPane ? 'h1' : '.mobile-back-btn')?.focus({ preventScroll: true });
       }
       return true;
     } catch (error) {
@@ -295,11 +324,15 @@
   async function switchSection(next: Section) {
     const target = next === section && view.kind !== 'settings' ? currentTarget()
       : next === 'diary' ? { kind: 'diary' as const, date: selectedDate } : { kind: 'empty' as const };
-    await navigate(target, next, false);
+    if (await navigate(target, next, false) && next === 'tags') showTagDirectory();
   }
 
   function isCollection(value: Section): value is CollectionKind {
     return value === 'web_links' || value === 'knowledge';
+  }
+
+  function usesSplitLibrary(value: Section) {
+    return isCollection(value) || value === 'tags';
   }
 
   function storeCollectionPreferences(kind: CollectionKind, preferences: CollectionPreferences) {
@@ -307,19 +340,35 @@
     try { localStorage.setItem(`oboromi-collection-${kind}`, JSON.stringify(preferences)); } catch { /* Keep the session preference. */ }
   }
 
-  async function changeCollectionLayout(kind: CollectionKind, layout: CollectionLayout) {
+  function changeCollectionLayout(kind: CollectionKind, layout: CollectionLayout) {
     if (collectionPreferences[kind].layout === layout) return;
-    if (layout !== 'inbox' && (mobileDetail || editor) && !(await navigate(currentTarget(), kind, false))) return;
     storeCollectionPreferences(kind, { ...collectionPreferences[kind], layout });
-    middlePane.scrollTop = 0;
+    detailPane.scrollTop = 0;
   }
 
   function changeCollectionSort(kind: CollectionKind, sort: CollectionSort) {
     storeCollectionPreferences(kind, { ...collectionPreferences[kind], sort });
-    const collection = kind === 'web_links' ? links : knowledge;
+    reloadCollection(kind, true);
+  }
+
+  function changeCollectionQuery(kind: CollectionKind, query: string) {
+    collectionQueries = { ...collectionQueries, [kind]: query };
+    reloadCollection(kind, !query.trim());
+  }
+
+  function reloadCollection(kind: CollectionKind, immediate: boolean) {
+    clearTimeout(collectionTimers[kind]);
+    const collection = collections[kind].items;
     collection.invalidate();
-    middlePane.scrollTop = 0;
-    void collection.load();
+    detailPane.scrollTop = 0;
+    if (immediate) void collection.load();
+    else collectionTimers[kind] = setTimeout(() => void collection.load(), 100);
+  }
+
+  function refreshCollection(kind: CollectionKind) {
+    clearTimeout(collectionTimers[kind]);
+    collections[kind].inbox.refresh();
+    collections[kind].items.refresh();
   }
 
   async function showList() {
@@ -328,7 +377,8 @@
       return;
     }
     if (await navigate(currentTarget(), section, false)) {
-      const focus = listFocus?.isConnected ? listFocus : middlePane.querySelector<HTMLElement>('[aria-current="true"], h1');
+      const overview = usesSplitLibrary(section) ? detailPane : middlePane;
+      const focus = listFocus?.isConnected ? listFocus : overview.querySelector<HTMLElement>('[aria-current="true"]') ?? overview.querySelector<HTMLElement>('h1');
       focus?.focus({ preventScroll: true });
     }
   }
@@ -342,11 +392,11 @@
   async function openSettings() {
     if (view.kind === 'settings') {
       drawerOpen = false;
-      mobileDetail = true;
+      detailOpen = true;
       return;
     }
     const previous = currentTarget();
-    const showingDetail = mobileDetail;
+    const showingDetail = detailOpen;
     if (await navigate({ kind: 'settings' })) {
       beforeSettings = previous;
       detailBeforeSettings = showingDetail;
@@ -354,7 +404,7 @@
   }
 
   function closeSettings() {
-    return navigate(beforeSettings ?? (section === 'diary' ? { kind: 'diary', date: selectedDate } : { kind: 'empty' }), section, detailBeforeSettings);
+    return navigate(beforeSettings ?? (section === 'diary' ? { kind: 'diary', date: selectedDate } : { kind: 'empty' }), section, Boolean(beforeSettings && detailBeforeSettings));
   }
 
   async function loadCalendar() {
@@ -379,7 +429,7 @@
   }
 
   function refreshTagResults() {
-    if (section !== 'tags') return;
+    if (section !== 'tags' || !tagIds.length) return;
     clearTimeout(tagTimer);
     void tagResults.load();
   }
@@ -397,7 +447,7 @@
       }
     } else if (view.kind === 'page' && view.page.id === receipt.pageId) {
       view = { ...view, page: { ...view.page, ...saved } };
-      if (view.page.kind === 'knowledge_page') void knowledge.load();
+      if (view.page.kind === 'knowledge_page') refreshCollection('knowledge');
     }
     refreshTagResults();
   }
@@ -481,7 +531,7 @@
         view = { ...view, page: { ...view.page, title, displayTitle, updatedAtMs: Math.max(updatedAtMs, view.page.updatedAtMs) } };
         void finishRename();
       }
-      if (kind === 'knowledge_page') void knowledge.load();
+      if (kind === 'knowledge_page') refreshCollection('knowledge');
       refreshTagResults();
     } catch (error) {
       reportError(error);
@@ -507,10 +557,10 @@
       if (current.kind === 'page') await api.softDeletePage(current.page.id);
       else await api.softDeleteWebLink(current.link.id);
       view = { kind: 'empty' };
-      mobileDetail = false;
+      detailOpen = false;
       void loadTags();
-      void links.load();
-      void knowledge.load();
+      refreshCollection('web_links');
+      refreshCollection('knowledge');
       refreshTagResults();
     } catch (error) {
       reportError(error);
@@ -535,22 +585,10 @@
       if (request !== tagListRequest) return;
       allTags = tags;
       tagsLoaded = true;
-      if (tagQuery.trim()) void filterTags();
     } catch (error) {
       if (request === tagListRequest) tagListError = normalizeError(error).message;
     } finally {
       if (request === tagListRequest) tagListLoading = false;
-    }
-  }
-
-  async function filterTags() {
-    const request = ++matchingTagsRequest;
-    if (!tagQuery.trim()) return;
-    try {
-      const tags = await api.listTags(tagQuery.trim());
-      if (request === matchingTagsRequest) matchingTags = tags;
-    } catch (error) {
-      if (request === matchingTagsRequest) reportError(error);
     }
   }
 
@@ -571,7 +609,7 @@
         if (view.kind === 'web_link' && view.link.id === id) {
           view = { ...view, link: { ...view.link, tags: refreshed.tags, updatedAtMs: refreshed.updatedAtMs } };
         }
-        void links.load();
+        refreshCollection('web_links');
       } else if (target.page) {
         const { id } = target.page;
         await api.setPageTags(id, ids);
@@ -580,7 +618,7 @@
           const page = { ...view.page, tags, updatedAtMs: Math.max(updatedAtMs, view.page.updatedAtMs) };
           view = view.kind === 'diary' ? { ...view, page } : { kind: 'page', page };
         }
-        if (target.page.kind === 'knowledge_page') void knowledge.load();
+        if (target.page.kind === 'knowledge_page') refreshCollection('knowledge');
       }
       await loadTags();
       refreshTagResults();
@@ -600,6 +638,10 @@
 
   function scheduleTagSearch(immediate = false) {
     clearTimeout(tagTimer);
+    if (!tagIds.length) {
+      tagResults.clear();
+      return;
+    }
     tagResults.invalidate();
     if (immediate) void tagResults.load();
     else tagTimer = setTimeout(() => void tagResults.load(), 50);
@@ -615,10 +657,36 @@
     scheduleTagSearch(true);
   }
 
-  function toggleTag(id: string) {
+  function setTagSelection(ids: string[]) {
     tagRename = null;
-    tagIds = tagIds.includes(id) ? tagIds.filter((tag) => tag !== id) : [...tagIds, id];
+    tagIds = ids;
+    detailPane.scrollTop = 0;
     scheduleTagSearch(true);
+  }
+
+  function showTagDirectory() {
+    tagSearch = '';
+    tagKind = '';
+    setTagSelection([]);
+  }
+
+  function browseTags() {
+    if (section === 'tags' && !detailOpen && view.kind !== 'settings') return Promise.resolve(true);
+    return navigate({ kind: 'empty' }, 'tags', false);
+  }
+
+  async function toggleTag(id: string) {
+    if (!(await browseTags())) return;
+    setTagSelection(tagIds.includes(id) ? tagIds.filter((tag) => tag !== id) : [...tagIds, id]);
+  }
+
+  async function openTag(id: string) {
+    if (!(await browseTags())) return;
+    tagSearch = '';
+    tagKind = '';
+    setTagSelection([id]);
+    await tick();
+    if (section === 'tags' && !detailOpen) detailPane.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
   }
 
   async function manageTag(action: 'create' | 'rename' | 'delete', tag?: TagSummary) {
@@ -642,8 +710,8 @@
       }
       await loadTags();
       if (action !== 'create') {
-        links.refresh();
-        knowledge.refresh();
+        refreshCollection('web_links');
+        refreshCollection('knowledge');
       }
       scheduleTagSearch(true);
     } catch (error) {
@@ -711,14 +779,14 @@
   function onLinkSaved(link: WebLinkDetail) {
     const editing = dialog?.kind === 'web_link' && dialog.link;
     dialog = null;
-    void links.load();
+    refreshCollection('web_links');
     refreshTagResults();
     void navigate({ kind: 'web_link', id: link.id }, editing ? section : 'web_links', true, { kind: 'web_link', link });
   }
 
   function onKnowledgeCreated(page: PageView) {
     dialog = null;
-    void knowledge.load();
+    refreshCollection('knowledge');
     refreshTagResults();
     void navigate({ kind: 'page', id: page.id }, 'knowledge', true, { kind: 'page', page });
   }
@@ -726,19 +794,23 @@
   async function refreshLibrary(restored = false) {
     if (restored) {
       beforeSettings = undefined;
-      tagIds = [];
+      showTagDirectory();
       appStatus = await api.getAppStatus();
-      links.clear();
-      knowledge.clear();
-    }
-    refreshTagResults();
-    if (restored) {
-      if (section === 'web_links') links.ensureLoaded();
-      if (section === 'knowledge') knowledge.ensureLoaded();
-      await Promise.all([loadCalendar(), loadTags()]);
+      for (const kind of ['web_links', 'knowledge'] as const) {
+        clearTimeout(collectionTimers[kind]);
+        collections[kind].inbox.clear();
+        collections[kind].items.clear();
+      }
+      if (isCollection(section)) {
+        collections[section].inbox.ensureLoaded();
+        collections[section].items.ensureLoaded();
+      }
     } else {
-      await Promise.all([loadCalendar(), loadTags(), links.load(), knowledge.load()]);
+      refreshCollection('web_links');
+      refreshCollection('knowledge');
+      refreshTagResults();
     }
+    await Promise.all([loadCalendar(), loadTags()]);
   }
 
   function openExport() {
@@ -872,7 +944,7 @@
             <Icon name="settings" size={16} /> <span class="breadcrumb-root">設定</span>
           {:else}
             <Icon name={sections[section].icon} size={16} /> <span class="breadcrumb-root">{sections[section].label}</span>
-            {#if viewTitle && (!collectionWorkspace || mobileDetail)}
+            {#if viewTitle && !showingOverview}
               <span class="breadcrumb-leaf"><Icon name="right" size={13} /> <span>{viewTitle}</span></span>
             {/if}
           {/if}
@@ -916,9 +988,10 @@
       </div>
     {/if}
 
-    <div class="workspace" class:collection-workspace={collectionWorkspace} class:mobile-detail={mobileDetail}
+    <div class="workspace" class:split-library={splitLibrary} class:detail-open={detailOpen}
       inert={unavailable && view.kind !== 'settings'}>
-      <aside class="middle-pane" aria-label={sections[section].label + 'の一覧'} bind:this={middlePane} inert={unavailable || settingsBusy || deleting}>
+      <aside class="middle-pane" aria-label={sections[section].label + (isCollection(section) ? 'の受信箱' : 'の一覧')}
+        bind:this={middlePane} inert={unavailable || settingsBusy || deleting}>
         {#if section === 'diary'}
           <DiaryCalendar year={month.year} month={month.month} {today} selected={selectedDate} entries={diaryDates}
             loading={calendarLoading} error={calendarError}
@@ -926,43 +999,133 @@
             on:month={(event) => moveCalendar(shiftYearMonth(month.year, month.month, event.detail))}
             on:today={() => void openToday()} on:retry={() => void loadCalendar()} />
         {:else if section === 'web_links'}
-          <CollectionList kind="web_links" preferences={collectionPreferences.web_links} {...$links}
-            selectedId={view.kind === 'web_link' ? view.link.id : view.kind === 'page' ? view.page.parent?.id : undefined}
+          <CollectionList kind="web_links" inbox preferences={collectionPreferences.web_links} {...$linkInbox}
+            selectedId={selectedLinkId}
             on:select={(event) => void navigate({ kind: 'web_link', id: event.detail })}
-            on:layout={(event) => void changeCollectionLayout('web_links', event.detail)} on:sort={(event) => changeCollectionSort('web_links', event.detail)}
             on:add={() => void openDialog({ kind: 'web_link' })} on:external={(event) => openExternal(event.detail)}
-            on:retry={() => void links.load()} on:more={() => void links.load(false)} />
+            on:retry={() => void linkInbox.load()} on:more={() => void linkInbox.load(false)} />
         {:else if section === 'knowledge'}
-          <CollectionList kind="knowledge" preferences={collectionPreferences.knowledge} {...$knowledge} selectedId={view.kind === 'page' ? view.page.id : undefined}
+          <CollectionList kind="knowledge" inbox preferences={collectionPreferences.knowledge} {...$knowledgeInbox}
+            selectedId={selectedItemId}
             on:select={(event) => void navigate({ kind: 'page', id: event.detail })}
-            on:layout={(event) => void changeCollectionLayout('knowledge', event.detail)} on:sort={(event) => changeCollectionSort('knowledge', event.detail)}
-            on:add={() => void openDialog({ kind: 'knowledge' })} on:retry={() => void knowledge.load()} on:more={() => void knowledge.load(false)} />
+            on:add={() => void openDialog({ kind: 'knowledge' })}
+            on:retry={() => void knowledgeInbox.load()} on:more={() => void knowledgeInbox.load(false)} />
         {:else}
-          <div class="pane-header"><h2>タグ</h2></div>
-          <div class="tag-controls">
+          <div class="tag-inbox-header">
+            <h2>タグ</h2>
             <form class="inline-form" on:submit|preventDefault={() => void manageTag('create')}>
               <input type="text" placeholder="新しいタグ名" aria-label="新しいタグ名" bind:value={tagName} disabled={tagsBusy} />
-              <button type="submit" class="small-button" disabled={tagsBusy || !tagName.trim()}><Icon name="plus" size={15} /> 追加</button>
+              <button type="submit" class="ghost icon-button" aria-label="タグを作成" title="タグを作成" disabled={tagsBusy || !tagName.trim()}>
+                <Icon name="plus" size={15} />
+              </button>
             </form>
             {#if tagError}<div class="notice-box error" role="alert">{tagError}</div>{/if}
+            {#if allTags.length}
+              <input type="search" placeholder="タグを検索" aria-label="タグ名で絞り込む" bind:value={tagQuery} />
+            {/if}
+          </div>
+          <div class="tag-inbox-list" aria-busy={tagListLoading}>
             {#if tagListError}
               <div class="notice-box error" role="alert">
                 {tagListError}
                 <button type="button" class="small-button" on:click={() => void loadTags()}>再試行</button>
               </div>
+            {:else if !visibleTags.length}
+              <p class="list-empty" role="status">{tagListLoading ? '読み込み中…' : allTags.length ? '一致するタグがありません。' : 'タグはまだありません。'}</p>
             {/if}
-            {#if allTags.length}
-              <input type="search" placeholder="タグ名で絞り込む…" aria-label="タグ名で絞り込む" value={tagQuery}
-                on:input={(event) => { tagQuery = event.currentTarget.value; matchingTags = []; void filterTags(); }} />
-              <div class="tag-bar">
-                {#each visibleTags as tag (tag.id)}
-                  <button type="button" class="tag-chip" class:active={tagIds.includes(tag.id)} aria-pressed={tagIds.includes(tag.id)}
-                    on:click={() => toggleTag(tag.id)}>{tag.name}<span class="tag-count">{tag.count}</span></button>
-                {/each}
+            {#each visibleTags as tag (tag.id)}
+              <TagBrowseButton {tag} selected={tagIds.includes(tag.id)} on:click={() => void toggleTag(tag.id)} />
+            {/each}
+          </div>
+        {/if}
+      </aside>
+
+      <main class="detail-pane" class:overview-pane={showingOverview}
+        class:writing-pane={!showingOverview && (view.kind === 'diary' || view.kind === 'page')}
+        bind:this={detailPane} aria-busy={detailLoading || initializing}>
+        {#if detailLoading}<div class="loading-line" aria-hidden="true"></div>{/if}
+        <button type="button" class="ghost mobile-back-btn" on:click={() => void showList()} disabled={unavailable}>
+          <Icon name="left" size={16} /> 一覧へ戻る
+        </button>
+
+        <div class="detail-content" inert={detailLoading || deleting}>
+          {#if view.kind === 'settings'}
+            <SettingsView status={appStatus} {theme} flushBeforeMutation={flushEditor} bind:busy={settingsBusy} on:theme={(event) => changeTheme(event.detail)}
+              on:restored={() => void refreshLibrary(true).catch(reportError)} on:trashRestored={() => void refreshLibrary()}
+              on:close={() => void closeSettings()} />
+          {:else if showingOverview && section === 'web_links'}
+            <CollectionList kind="web_links" preferences={collectionPreferences.web_links} {...$links}
+              selectedId={selectedLinkId} query={collectionQueries.web_links}
+              on:select={(event) => void navigate({ kind: 'web_link', id: event.detail })}
+              on:layout={(event) => changeCollectionLayout('web_links', event.detail)} on:sort={(event) => changeCollectionSort('web_links', event.detail)}
+              on:query={(event) => changeCollectionQuery('web_links', event.detail)} on:tag={(event) => void openTag(event.detail)}
+              on:external={(event) => openExternal(event.detail)} on:retry={() => void links.load()} on:more={() => void links.load(false)} />
+          {:else if showingOverview && section === 'knowledge'}
+            <CollectionList kind="knowledge" preferences={collectionPreferences.knowledge} {...$knowledge}
+              selectedId={selectedItemId} query={collectionQueries.knowledge}
+              on:select={(event) => void navigate({ kind: 'page', id: event.detail })}
+              on:layout={(event) => changeCollectionLayout('knowledge', event.detail)} on:sort={(event) => changeCollectionSort('knowledge', event.detail)}
+              on:query={(event) => changeCollectionQuery('knowledge', event.detail)} on:tag={(event) => void openTag(event.detail)}
+              on:retry={() => void knowledge.load()} on:more={() => void knowledge.load(false)} />
+          {:else if showingOverview && section === 'tags'}
+            <header class="collection-header overview">
+              <div class="collection-heading">
+                {#if tagIds.length}
+                  <button type="button" class="ghost compact-button" on:click={showTagDirectory}>
+                    <Icon name="left" size={15} /> タグ一覧
+                  </button>
+                {/if}
+                <span class="row-icon tone-tag"><Icon name="tag" size={17} /></span>
+                <h1 tabindex="-1">{singleTag ? `${singleTag.name} (${singleTag.count})` : tagIds.length ? 'タグの関連項目' : 'タグ一覧'}</h1>
               </div>
-              {#if tagIds.length}
-                <div class="tag-selection-actions">
-                  <button type="button" class="ghost compact-button" on:click={() => { tagIds = []; tagRename = null; scheduleTagSearch(true); }}>選択を解除</button>
+              <div class="collection-options">
+                {#if tagIds.length}
+                  <label class="collection-select">
+                    <Icon name={collectionLayouts[tagLayout].icon} size={15} />
+                    <select aria-label="関連項目の表示形式" bind:value={tagLayout}>
+                      {#each Object.entries(collectionLayouts) as [value, option]}
+                        <option {value}>{option.label}</option>
+                      {/each}
+                    </select>
+                  </label>
+                {:else}
+                  <label class="collection-select">
+                    <Icon name="sort" size={15} />
+                    <select aria-label="タグの並び替え" bind:value={tagOrder}>
+                      <option value="name">名前順</option>
+                      <option value="count_desc">件数が多い順</option>
+                      <option value="count_asc">件数が少ない順</option>
+                    </select>
+                  </label>
+                {/if}
+              </div>
+            </header>
+            {#if tagIds.length}
+              <section class="tag-result-controls" aria-label="関連項目の絞り込み">
+                {#if selectedTags.length > 1}
+                  <div class="tag-selection-actions" aria-label="選択中のタグ">
+                    {#each selectedTags as tag (tag.id)}
+                      <TagBrowseButton {tag} selected on:click={() => void toggleTag(tag.id)} />
+                    {/each}
+                  </div>
+                {/if}
+                <div class="tag-result-filters">
+                  <label class="collection-search">
+                    <Icon name="search" size={15} />
+                    <input type="search" placeholder="関連項目を検索" aria-label="タグ検索キーワード" bind:value={tagSearch} on:input={() => scheduleTagSearch()} />
+                  </label>
+                  <label class="collection-select">
+                    <select aria-label="対象種別" value={tagKind} on:change={(event) => changeTagKind(event.currentTarget.value)}>
+                      <option value="">すべての種別</option>
+                      {#each searchKindOptions as [key, entry] (key)}<option value={key}>{entry.label}</option>{/each}
+                    </select>
+                  </label>
+                  <label class="collection-select">
+                    <Icon name="sort" size={15} />
+                    <select aria-label="関連項目の並び替え" value={tagSort} on:change={(event) => changeTagSort(event.currentTarget.value)}>
+                      <option value="relevance">一致優先</option><option value="updated">更新順</option>
+                    </select>
+                  </label>
                   {#if singleTag && tagRename === null}
                     <button type="button" class="ghost compact-button" disabled={tagsBusy} on:click={() => (tagRename = singleTag?.name ?? null)}>改名</button>
                     <button type="button" class="ghost compact-button" disabled={tagsBusy} on:click={() => void manageTag('delete', singleTag)}>削除</button>
@@ -975,63 +1138,23 @@
                     <button type="button" class="ghost icon-button" aria-label="改名を取り消す" disabled={tagsBusy} on:click={() => (tagRename = null)}><Icon name="close" size={15} /></button>
                   </form>
                 {/if}
-              {/if}
-            {:else if !tagListError}
-              <p class="inline-hint" role="status">{tagListLoading ? 'タグを読み込み中…' : 'タグはまだありません。'}</p>
-            {/if}
-          </div>
-          <div class="tag-controls tag-search-controls">
-            <h3>項目を絞り込む</h3>
-            <input type="search" placeholder="キーワードを入力…" aria-label="タグ検索キーワード" bind:value={tagSearch} on:input={() => scheduleTagSearch()} />
-            <div class="inline-form">
-              <select aria-label="対象種別" value={tagKind}
-                on:change={(event) => changeTagKind(event.currentTarget.value)}>
-                <option value="">すべての種別</option>
-                {#each searchKindOptions as [key, entry] (key)}<option value={key}>{entry.label}</option>{/each}
-              </select>
-              <select aria-label="並び順" value={tagSort}
-                on:change={(event) => changeTagSort(event.currentTarget.value)}>
-                <option value="relevance">一致優先</option><option value="updated">更新順</option>
-              </select>
-            </div>
-            {#if isShortQuery(tagSearch)}<p class="inline-hint">1〜2文字ではタイトル・タグ・ホスト名の先頭から検索</p>{/if}
-          </div>
-          <div class="list-scroll" aria-busy={$tagResults.loading}>
-            {#if $tagResults.error}
-              <div class="notice-box error" role="alert">{$tagResults.error}
-                <button type="button" class="small-button" on:click={() => void tagResults.load()}>再試行</button>
+                {#if isShortQuery(tagSearch)}<p class="inline-hint">1〜2文字ではタイトル・タグ・ホスト名の先頭から検索</p>{/if}
+              </section>
+              <TagResults layout={tagLayout} {...$tagResults} selectedId={selectedItemId}
+                on:open={(event) => openHit(event.detail)} on:retry={() => void tagResults.load()} on:more={() => void tagResults.load(false)} />
+            {:else}
+              <div class="collection-body overview" aria-busy={tagListLoading}>
+                {#if !catalogTags.length && !tagListError}
+                  <p class="list-empty" role="status">{tagListLoading ? 'タグを読み込み中…' : allTags.length ? '一致するタグがありません。' : 'タグはまだありません。'}</p>
+                {:else}
+                  <div class="tag-catalog">
+                    {#each catalogTags as tag (tag.id)}
+                      <TagBrowseButton {tag} on:click={() => void openTag(tag.id)} />
+                    {/each}
+                  </div>
+                {/if}
               </div>
-            {:else if !$tagResults.items.length}
-              <p class="list-empty" role="status">{$tagResults.loading ? '検索中…' : '条件に一致する項目はありません。'}</p>
             {/if}
-            {#each $tagResults.items as hit (`${hit.kind}:${hit.id}`)}
-              {@const appearance = searchKinds[hit.kind]}
-              {@const selected = (view.kind === 'web_link' && hit.id === view.link.id) || (documentPage?.id === hit.id)}
-              <button type="button" class="list-row" class:selected aria-current={selected ? 'true' : undefined} on:click={() => openHit(hit)}>
-                <span class={'row-icon tone-' + appearance.tone}><Icon name={appearance.icon} size={16} /></span>
-                <span class="row-labels"><span class="row-title">{hit.title}</span>
-                  <span class="row-sub">{appearance.label} · {hit.parent?.title ?? formatTimestamp(hit.updatedAtMs)}</span></span>
-              </button>
-            {/each}
-            {#if $tagResults.nextCursor}
-              <button type="button" class="list-more" disabled={$tagResults.loading} on:click={() => void tagResults.load(false)}>さらに表示</button>
-            {/if}
-          </div>
-        {/if}
-      </aside>
-
-      <main class="detail-pane" class:writing-pane={view.kind === 'diary' || view.kind === 'page'}
-        bind:this={detailPane} aria-busy={detailLoading || initializing}>
-        {#if detailLoading}<div class="loading-line" aria-hidden="true"></div>{/if}
-        <button type="button" class="ghost mobile-back-btn" on:click={() => void showList()} disabled={unavailable}>
-          <Icon name="left" size={16} /> 一覧へ戻る
-        </button>
-
-        <div class="detail-content" inert={detailLoading || deleting}>
-          {#if view.kind === 'settings'}
-            <SettingsView status={appStatus} {theme} flushBeforeMutation={flushEditor} bind:busy={settingsBusy} on:theme={(event) => changeTheme(event.detail)}
-              on:restored={() => void refreshLibrary(true).catch(reportError)} on:trashRestored={() => void refreshLibrary()}
-              on:close={() => void closeSettings()} />
           {:else if view.kind === 'web_link'}
             {@const link = view.link}
             <article class="detail-container">
@@ -1057,7 +1180,7 @@
                   <div><dt><Icon name="tag" size={15} /> タグ</dt><dd>
                     {#key link.id}
                       <TagEditor tags={link.tags} disabled={tagsBusy} on:open={() => void openDialog({ kind: 'record_tags' })}
-                        on:remove={(event) => removeRecordTag(event.detail)} />
+                        on:remove={(event) => removeRecordTag(event.detail)} on:select={(event) => void openTag(event.detail)} />
                     {/key}
                   </dd></div>
                   <div><dt><Icon name="clock" size={15} /> 更新</dt><dd>{formatTimestamp(link.updatedAtMs)}</dd></div>
@@ -1154,7 +1277,7 @@
                     {#if page}
                       {#key page.id}
                         <TagEditor tags={page.tags} disabled={tagsBusy} on:open={() => void openDialog({ kind: 'record_tags' })}
-                          on:remove={(event) => removeRecordTag(event.detail)} />
+                          on:remove={(event) => removeRecordTag(event.detail)} on:select={(event) => void openTag(event.detail)} />
                       {/key}
                     {:else}
                       <span class="property-placeholder">初回保存後に追加できます</span>

@@ -51,28 +51,41 @@ fn test_collection_sort_orders_before_paginating_with_equal_keys() {
         service::create_knowledge_page(&db, title, Some("# 本文の抜粋")).unwrap();
     }
 
-    let first = service::list_web_links(&db, None, CollectionSort::TitleAsc).unwrap();
+    let first = service::list_web_links(&db, None, CollectionSort::TitleAsc, None).unwrap();
     assert_eq!(first.items[0].display_title, "apple");
     assert_eq!(first.items[1].display_title, "Ｚｅｂｒａ");
     assert_eq!(first.items.len(), 30);
     let cursor = first.next_cursor.as_deref().unwrap();
-    assert!(service::list_web_links(&db, Some(cursor), CollectionSort::CreatedDesc).is_err());
-    let second = service::list_web_links(&db, Some(cursor), CollectionSort::TitleAsc).unwrap();
+    assert!(service::list_web_links(&db, Some(cursor), CollectionSort::CreatedDesc, None).is_err());
+    let second = service::list_web_links(&db, Some(cursor), CollectionSort::TitleAsc, None).unwrap();
     assert_eq!(second.items.len(), 5);
     assert!(second.next_cursor.is_none());
     let ids: HashSet<_> = first.items.iter().chain(&second.items).map(|item| &item.id).collect();
     assert_eq!(ids.len(), 35);
     assert!(first.items[29].id < second.items[0].id);
 
-    let latest = service::list_web_links(&db, None, CollectionSort::CreatedDesc).unwrap();
+    let latest = service::list_web_links(&db, None, CollectionSort::CreatedDesc, None).unwrap();
     assert!(latest.items.windows(2).all(|pair| pair[0].created_at_ms >= pair[1].created_at_ms));
-    let oldest = service::list_web_links(&db, None, CollectionSort::CreatedAsc).unwrap();
+    let oldest = service::list_web_links(&db, None, CollectionSort::CreatedAsc, None).unwrap();
     assert!(oldest.items.windows(2).all(|pair| pair[0].created_at_ms <= pair[1].created_at_ms));
 
-    let first = service::list_knowledge_pages(&db, None, CollectionSort::TitleDesc).unwrap();
-    let second = service::list_knowledge_pages(&db, first.next_cursor.as_deref(), CollectionSort::TitleDesc).unwrap();
+    let first = service::list_knowledge_pages(&db, None, CollectionSort::TitleDesc, None).unwrap();
+    let second = service::list_knowledge_pages(&db, first.next_cursor.as_deref(), CollectionSort::TitleDesc, None).unwrap();
     assert_eq!(second.items.last().unwrap().display_title, "apple");
     assert_eq!(second.items[0].excerpt.trim(), "本文の抜粋");
+
+    let sort = CollectionSort::TitleAsc;
+    let filtered = service::list_web_links(&db, None, sort, Some("タイトル")).unwrap();
+    let cursor = filtered.next_cursor.as_deref().unwrap();
+    let tail = service::list_web_links(&db, Some(cursor), sort, Some("タイトル")).unwrap();
+    assert_eq!(filtered.items.len() + tail.items.len(), 33);
+    assert!(service::list_web_links(&db, Some(cursor), sort, Some("apple")).is_err());
+    assert!(tail.items.iter().all(|item| item.display_title == "同じタイトル"));
+    let by_url = service::list_web_links(&db, None, sort, Some("example/34")).unwrap();
+    assert_eq!(by_url.items[0].display_title, "apple");
+    let by_body = service::list_knowledge_pages(&db, None, sort, Some("本文の抜粋")).unwrap();
+    assert_eq!(by_body.items.len(), 30);
+    assert!(by_body.next_cursor.is_some());
 }
 
 #[test]
@@ -1156,10 +1169,10 @@ fn test_knowledge_page_lifecycle_search_trash_and_export() {
     for i in 0..33 {
         service::create_knowledge_page(&db, &format!("ページ{i:02}"), None).unwrap();
     }
-    let page1 = service::list_knowledge_pages(&db, None, Default::default()).unwrap();
+    let page1 = service::list_knowledge_pages(&db, None, Default::default(), None).unwrap();
     assert_eq!(page1.items.len(), 30);
     assert!(page1.next_cursor.is_some());
-    let page2 = service::list_knowledge_pages(&db, page1.next_cursor.as_deref(), Default::default()).unwrap();
+    let page2 = service::list_knowledge_pages(&db, page1.next_cursor.as_deref(), Default::default(), None).unwrap();
     assert_eq!(page2.items.len(), 5);
     assert!(page2.next_cursor.is_none());
     let unique_ids: HashSet<String> = page1

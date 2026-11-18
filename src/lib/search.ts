@@ -9,6 +9,10 @@ export const searchKinds: Record<SearchKind, { label: string; icon: string; tone
 
 export const searchKindOptions = Object.entries(searchKinds) as [SearchKind, typeof searchKinds[SearchKind]][];
 
+export function normalizeTagQuery(query: string): string {
+  return query.normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
 export function isShortQuery(query: string): boolean {
   const length = [...query.normalize('NFKC').trim().replace(/\s+/g, ' ')].length;
   return length === 1 || length === 2;

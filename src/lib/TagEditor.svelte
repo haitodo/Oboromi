@@ -9,13 +9,15 @@
   const dispatch = createEventDispatcher<{
     open: void;
     remove: string;
+    select: string;
   }>();
 </script>
 
 <div class="tag-bar tag-editor">
   {#each tags as tag (tag.id)}
     <span class="tag-chip active">
-      <span class="tag-chip-name">{tag.name}</span>
+      <button type="button" class="tag-chip-name" aria-label={`${tag.name}の関連項目を表示`} {disabled}
+        on:click={() => dispatch('select', tag.id)}>{tag.name}</button>
       <button
         type="button"
         class="tag-remove"

@@ -545,9 +545,10 @@ pub fn list_web_links(
     db: &DbManager,
     cursor: Option<&str>,
     sort: CollectionSort,
+    query: Option<&str>,
 ) -> Result<ResultPage<WebLinkSummary>, AppError> {
     db.with_reader(|conn| {
-        collection::list(conn, collection::Collection::WebLinks, WEB_LINK_COLUMNS, sort, cursor,
+        collection::list(conn, collection::Collection::WebLinks, WEB_LINK_COLUMNS, sort, cursor, query,
             |row| read_web_link_summary(conn, row))
     })
 }
@@ -660,11 +661,12 @@ pub fn list_knowledge_pages(
     db: &DbManager,
     cursor: Option<&str>,
     sort: CollectionSort,
+    query: Option<&str>,
 ) -> Result<ResultPage<KnowledgePageSummary>, AppError> {
     db.with_reader(|conn| {
         collection::list(conn, collection::Collection::Knowledge,
             "r.id, r.title, r.revision, r.created_at_ms, r.updated_at_ms, substr(r.body_markdown, 1, 500)",
-            sort, cursor, |row| {
+            sort, cursor, query, |row| {
                 let id: String = row.get(0)?;
                 let title: String = row.get(1)?;
                 let markdown: String = row.get(5)?;

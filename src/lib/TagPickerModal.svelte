@@ -3,6 +3,7 @@
   import { normalizeError } from './api';
   import Icon from './Icon.svelte';
   import Modal from './Modal.svelte';
+  import { normalizeTagQuery } from './search';
   import type { Tag, TagSummary } from './types';
 
   export let tags: Tag[];
@@ -20,15 +21,11 @@
   let composing = false;
   let error = '';
 
-  $: queryKey = nameKey(query);
-  $: matches = allTags.filter((tag) => tag.nameKey.includes(queryKey) || nameKey(tag.name).includes(queryKey));
-  $: exactMatch = matches.some((tag) => tag.nameKey === queryKey || nameKey(tag.name) === queryKey);
+  $: queryKey = normalizeTagQuery(query);
+  $: matches = allTags.filter((tag) => tag.nameKey.includes(queryKey) || normalizeTagQuery(tag.name).includes(queryKey));
+  $: exactMatch = matches.some((tag) => tag.nameKey === queryKey || normalizeTagQuery(tag.name) === queryKey);
   $: newName = queryKey && !loading && !loadError && !exactMatch ? query.trim() : '';
   $: changed = selected.size !== tags.length || tags.some((tag) => !selected.has(tag.id));
-
-  function nameKey(value: string) {
-    return value.normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
-  }
 
   function selectTag(id: string, checked: boolean) {
     const next = new Set(selected);
@@ -96,7 +93,7 @@
             <label class="tag-picker-option" class:selected={selected.has(tag.id)}>
               <Icon name="tag" size={16} />
               <span class="tag-picker-name">{tag.name}</span>
-              <span class="tag-count">{tag.count}件</span>
+              <span class="tag-count">({tag.count})</span>
               <input type="checkbox" aria-label={tag.name} checked={selected.has(tag.id)} disabled={saving}
                 on:change={(event) => selectTag(tag.id, event.currentTarget.checked)} />
             </label>

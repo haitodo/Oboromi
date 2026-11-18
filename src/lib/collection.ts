@@ -3,9 +3,8 @@ import { normalizeError } from './api';
 import type { CollectionSort, ResultPage } from './types';
 
 export const collectionLayouts = {
-  inbox: { label: '受信箱', icon: 'panel' },
-  list: { label: 'リスト', icon: 'list' },
   gallery: { label: 'ギャラリー', icon: 'grid' },
+  list: { label: 'リスト', icon: 'list' },
   table: { label: 'テーブル', icon: 'table' },
 };
 

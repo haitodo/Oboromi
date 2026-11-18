@@ -10,6 +10,8 @@
 
   export let kind: CollectionKind;
   export let preferences: CollectionPreferences;
+  export let inbox = false;
+  export let query = '';
   export let items: (WebLinkSummary | KnowledgePageSummary)[];
   export let selectedId: string | undefined;
   export let loading: boolean;
@@ -25,18 +27,17 @@
     retry: void;
     layout: CollectionLayout;
     sort: CollectionSort;
+    query: string;
+    tag: string;
   }>();
 
   $: isLinks = kind === 'web_links';
   $: label = isLinks ? 'Webリンク' : 'ナレッジ';
   $: icon = isLinks ? 'link' : 'note';
-  $: layout = preferences.layout;
-  $: overview = layout !== 'inbox';
+  $: layout = inbox ? 'list' : preferences.layout;
 
   function changeLayout(event: Event & { currentTarget: HTMLSelectElement }) {
-    const next = event.currentTarget.value as CollectionLayout;
-    event.currentTarget.value = layout;
-    dispatch('layout', next);
+    dispatch('layout', event.currentTarget.value as CollectionLayout);
   }
 
   function changeSort(event: Event & { currentTarget: HTMLSelectElement }) {
@@ -48,35 +49,45 @@
   }
 </script>
 
-<header class="collection-header" class:overview>
+<header class="collection-header" class:overview={!inbox}>
   <div class="collection-heading">
-    <span class="row-icon" class:tone-link={isLinks} class:tone-knowledge={!isLinks}><Icon name={icon} size={17} /></span>
-    {#if overview}<h1 tabindex="-1">{label}</h1>{:else}<h2>{label}</h2>{/if}
-    <button type="button" class="small-button" aria-label={`${label}を追加`} {disabled} on:click={() => dispatch('add')}>
-      <Icon name="plus" size={15} /> 追加
-    </button>
+    {#if inbox}
+      <h2>受信箱</h2>
+      <button type="button" class="ghost icon-button" aria-label={`${label}を追加`} title={`${label}を追加`} {disabled}
+        on:click={() => dispatch('add')}><Icon name="plus" size={16} /></button>
+    {:else}
+      <span class="row-icon" class:tone-link={isLinks} class:tone-knowledge={!isLinks}><Icon name={icon} size={17} /></span>
+      <h1 tabindex="-1">{label}</h1>
+    {/if}
   </div>
-  <div class="collection-options">
-    <label class="collection-select">
-      <Icon name={collectionLayouts[layout].icon} size={15} />
-      <select aria-label="表示形式" value={layout} {disabled} on:change={changeLayout}>
-        {#each Object.entries(collectionLayouts) as [value, option]}
-          <option {value}>{option.label}</option>
-        {/each}
-      </select>
-    </label>
-    <label class="collection-select">
-      <Icon name="sort" size={15} />
-      <select aria-label="並び替え" value={preferences.sort} {disabled} on:change={changeSort}>
-        {#each Object.entries(collectionSorts) as [value, caption]}
-          <option {value}>{caption}</option>
-        {/each}
-      </select>
-    </label>
-  </div>
+  {#if !inbox}
+    <div class="collection-options">
+      <label class="collection-search">
+        <Icon name="search" size={15} />
+        <input type="search" value={query} placeholder="一覧内を検索" aria-label={`${label}内を検索`} {disabled}
+          on:input={(event) => dispatch('query', event.currentTarget.value)} />
+      </label>
+      <label class="collection-select">
+        <Icon name={collectionLayouts[layout].icon} size={15} />
+        <select aria-label="表示形式" value={layout} {disabled} on:change={changeLayout}>
+          {#each Object.entries(collectionLayouts) as [value, option]}
+            <option {value}>{option.label}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="collection-select">
+        <Icon name="sort" size={15} />
+        <select aria-label="並び替え" value={preferences.sort} {disabled} on:change={changeSort}>
+          {#each Object.entries(collectionSorts) as [value, caption]}
+            <option {value}>{caption}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+  {/if}
 </header>
 
-<div class="collection-body" class:overview aria-busy={loading}>
+<div class="collection-body" class:overview={!inbox} aria-busy={loading}>
   {#if error}
     <div class="notice-box error" role="alert">
       {error}
@@ -84,7 +95,7 @@
     </div>
   {/if}
   {#if items.length === 0 && !error}
-    <p class="list-empty" role="status">{loading ? '読み込み中…' : `${label}はまだありません。`}</p>
+    <p class="list-empty" role="status">{loading ? '読み込み中…' : query.trim() ? '一致する項目がありません。' : `${label}はまだありません。`}</p>
   {/if}
   {#if layout === 'gallery'}
     <div class="collection-gallery">
@@ -113,7 +124,7 @@
             {:else}
               <div class="gallery-source"><Icon name="clock" size={13} /> <span>{formatTimestamp(item.updatedAtMs)}</span></div>
             {/if}
-            <CollectionTagLabels tags={item.tags} />
+            <CollectionTagLabels tags={item.tags} on:select={(event) => dispatch('tag', event.detail)} />
           </div>
         </article>
       {/each}
@@ -147,7 +158,7 @@
                   </button>
                 </td>
               {/if}
-              <td><CollectionTagLabels tags={item.tags} /></td>
+              <td><CollectionTagLabels tags={item.tags} on:select={(event) => dispatch('tag', event.detail)} /></td>
               <td class="collection-time">{formatTimestamp(item.updatedAtMs)}</td>
               <td class="collection-time">{formatTimestamp(item.createdAtMs)}</td>
             </tr>
@@ -170,7 +181,7 @@
             </span>
           </span>
         </button>
-        {#if overview}<CollectionTagLabels tags={item.tags} />{/if}
+        {#if !inbox}<CollectionTagLabels tags={item.tags} on:select={(event) => dispatch('tag', event.detail)} />{/if}
         {#if 'normalizedUrl' in item}
           <button type="button" class="ghost icon-button collection-external"
             title="ブラウザで開く" aria-label={`${item.displayTitle}をブラウザで開く`}

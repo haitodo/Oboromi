@@ -206,7 +206,7 @@
         {#each allTags as tag (tag.id)}
           <button type="button" class="tag-chip" class:active={tagIds.includes(tag.id)}
             aria-pressed={tagIds.includes(tag.id)} on:click={() => toggleTag(tag.id)}>
-            {tag.name}<span class="tag-count">{tag.count}</span>
+            {tag.name}<span class="tag-count">({tag.count})</span>
           </button>
         {/each}
       </div>
