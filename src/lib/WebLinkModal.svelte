@@ -38,7 +38,7 @@
   }
 </script>
 
-<Modal {label} closeDisabled={saving} on:close={() => dispatch('close')}>
+<Modal {label} className="link-form-card" closeDisabled={saving} on:close={() => dispatch('close')}>
   <div class="modal-header">
     <span class="row-icon tone-link"><Icon name="link" size={18} /></span>
     <h2>{label}</h2>
@@ -59,7 +59,8 @@
     </div>
     <div class="form-field">
       <label for="link-description">説明</label>
-      <textarea id="link-description" rows="3" placeholder="用途やメモ（任意）" bind:value={description} disabled={saving} />
+      <textarea id="link-description" class="link-description-input" rows="4" placeholder="用途やメモ（任意）"
+        bind:value={description} disabled={saving} />
     </div>
 
     {#if error}<div class="notice-box error" role="alert">{error}</div>{/if}

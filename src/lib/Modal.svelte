@@ -4,6 +4,7 @@
   export let label: string;
   export let closeDisabled = false;
   export let palette = false;
+  export let className = '';
 
   const dispatch = createEventDispatcher<{ close: void }>();
   let dialog: HTMLDialogElement;
@@ -27,7 +28,7 @@
 
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <dialog
-  class="modal-card"
+  class={'modal-card ' + className}
   class:palette-card={palette}
   aria-label={label}
   bind:this={dialog}

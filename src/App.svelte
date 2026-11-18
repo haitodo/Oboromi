@@ -15,6 +15,7 @@
   import PaletteModal from './lib/PaletteModal.svelte';
   import SettingsView from './lib/SettingsView.svelte';
   import TagEditor from './lib/TagEditor.svelte';
+  import TagPickerModal from './lib/TagPickerModal.svelte';
   import WebLinkModal from './lib/WebLinkModal.svelte';
   import type { AppStatus, PageView, SaveReceipt, SearchHit, SearchKind, SearchSort, TagSummary, WebLinkDetail } from './lib/types';
 
@@ -29,7 +30,7 @@
     | { kind: 'empty' | 'settings' }
     | { kind: 'diary'; date: string }
     | { kind: 'page' | 'web_link'; id: string };
-  type Dialog = { kind: 'search' | 'knowledge' } | { kind: 'web_link'; link?: WebLinkDetail } | { kind: 'export'; id: string };
+  type Dialog = { kind: 'search' | 'knowledge' | 'record_tags' } | { kind: 'web_link'; link?: WebLinkDetail } | { kind: 'export'; id: string };
 
   const sections: Record<Section, { label: string; icon: string; tone: string }> = {
     diary: { label: '日記', icon: 'calendar', tone: 'diary' },
@@ -53,7 +54,7 @@
   let retryDetail: (() => void) | null = null;
   let settingsBusy = false;
   let deleting = false;
-  let theme: 'light' | 'dark' = 'light';
+  let theme: 'light' | 'dark' = 'dark';
 
   let width = window.innerWidth;
   let drawerOpen = false;
@@ -81,6 +82,7 @@
   let reordering = false;
   let renameTitle: string | null = null;
   let renameInput: HTMLInputElement;
+  let titleButton: HTMLButtonElement;
   let renaming = false;
 
   let allTags: TagSummary[] = [];
@@ -102,7 +104,7 @@
   let tagTimer: ReturnType<typeof setTimeout> | undefined;
   const tagResults = createCollection((cursor) => api.search(tagSearch, tagKind || undefined, tagIds, tagSort, cursor));
 
-  let returnSearchFocus: HTMLElement | null = null;
+  let returnDialogFocus: HTMLElement | null = null;
   let exportPath = '';
   let exportMessage = '';
   let exportError = '';
@@ -114,6 +116,7 @@
   $: isMultiPane = width >= 760;
   $: drawerVisible = drawerOpen && width < 1000;
   $: documentPage = view.kind === 'page' || view.kind === 'diary' ? view.page : null;
+  $: tagRecord = view.kind === 'web_link' ? view.link : documentPage;
   $: documentKey = view.kind === 'diary' ? `diary:${view.date}` : view.kind === 'page' ? `page:${view.page.id}` : '';
   $: viewTitle = view.kind === 'diary' ? formatDiaryDate(view.date, false)
     : view.kind === 'page' ? view.page.displayTitle : view.kind === 'web_link' ? view.link.displayTitle : '';
@@ -125,11 +128,14 @@
     let stopped = false;
     let unlisten: (() => void) | undefined;
     let closing = false;
-    try { theme = localStorage.getItem('oboromi-theme') === 'dark' ? 'dark' : 'light'; } catch { /* Use the default. */ }
+    try {
+      const storedTheme = localStorage.getItem('oboromi-theme');
+      if (storedTheme === 'light' || storedTheme === 'dark') theme = storedTheme;
+    } catch { /* Use the default. */ }
     void initialize();
     try {
       void getCurrentWindow().onCloseRequested(async (event) => {
-        if (closing || exporting || pickingExport || settingsBusy || deleting) {
+        if (closing || exporting || pickingExport || settingsBusy || deleting || tagsBusy) {
           event.preventDefault();
           return;
         }
@@ -421,6 +427,12 @@
     renameInput?.select();
   }
 
+  async function finishRename() {
+    renameTitle = null;
+    await tick();
+    titleButton?.focus();
+  }
+
   async function renamePage() {
     if (view.kind !== 'page' || renameTitle === null || renaming) return;
     renaming = true;
@@ -429,7 +441,7 @@
       const { title, displayTitle, updatedAtMs, kind } = await api.renamePage(id, renameTitle);
       if (view.kind === 'page' && view.page.id === id) {
         view = { ...view, page: { ...view.page, title, displayTitle, updatedAtMs: Math.max(updatedAtMs, view.page.updatedAtMs) } };
-        renameTitle = null;
+        void finishRename();
       }
       if (kind === 'knowledge_page') void knowledge.load();
       refreshTagResults();
@@ -473,7 +485,7 @@
   }
 
   function ensureTags() {
-    if (!tagsLoaded && !tagListLoading) void loadTags();
+    if ((!tagsLoaded || tagListError) && !tagListLoading) void loadTags();
   }
 
   async function loadTags() {
@@ -504,7 +516,7 @@
     }
   }
 
-  async function saveRecordTags({ ids, name }: { ids: string[]; name?: string }) {
+  async function saveRecordTags(ids: string[], name?: string) {
     if (tagsBusy) return;
     const target = view;
     if (target.kind !== 'web_link' && (!('page' in target) || !target.page)) return;
@@ -512,8 +524,7 @@
     try {
       if (name) {
         const created = await api.createTag(name);
-        if (ids.includes(created.id)) return;
-        ids = [...ids, created.id];
+        if (!ids.includes(created.id)) ids = [...ids, created.id];
       }
       if (target.kind === 'web_link') {
         const { id } = target.link;
@@ -537,10 +548,16 @@
       refreshTagResults();
     } catch (error) {
       if (name) void loadTags();
-      reportError(error);
+      throw error;
     } finally {
       tagsBusy = false;
     }
+  }
+
+  function removeRecordTag(id: string) {
+    if (!tagRecord) return;
+    const ids = tagRecord.tags.filter((tag) => tag.id !== id).map((tag) => tag.id);
+    void saveRecordTags(ids).catch(reportError);
   }
 
   function scheduleTagSearch(immediate = false) {
@@ -610,40 +627,42 @@
     const target = targetForHit(hit);
     if (!target) return;
     const hitSection: Section = hit.kind === 'diary' ? 'diary' : hit.kind === 'knowledge_page' ? 'knowledge' : 'web_links';
-    if (fromSearch) clearSearch();
+    if (fromSearch) clearDialog();
     void navigate(target, fromSearch ? hitSection : section, true, undefined, fromSearch);
   }
 
   async function openDialog(next: Dialog) {
     if (dialog || blocked) return;
+    const request = detailRequest;
     const focus = document.activeElement as HTMLElement | null;
     if (!(await flushEditor()) || dialog || blocked) return;
+    if (next.kind === 'record_tags' && (request !== detailRequest || detailLoading || tagsBusy || !tagRecord)) return;
     detailRequest += 1;
     detailLoading = false;
     closeMenus();
     drawerOpen = false;
-    if (next.kind === 'search') {
-      returnSearchFocus = focus;
+    if (next.kind === 'search' || next.kind === 'record_tags') {
+      returnDialogFocus = focus;
       ensureTags();
     }
     dialog = next;
   }
 
-  function clearSearch() {
+  function clearDialog() {
     dialog = null;
-    returnSearchFocus = null;
+    returnDialogFocus = null;
   }
 
-  async function cancelSearch() {
-    const focus = returnSearchFocus;
-    clearSearch();
+  async function closeFocusedDialog() {
+    const focus = returnDialogFocus;
+    clearDialog();
     await tick();
     if (focus?.getClientRects().length) focus.focus();
     else drawerButton?.focus();
   }
 
   function quickAdd(kind: 'web_link' | 'knowledge') {
-    clearSearch();
+    clearDialog();
     dialog = { kind };
   }
 
@@ -737,7 +756,7 @@
   }
 
   function globalKeydown(event: KeyboardEvent) {
-    if (event.isComposing || event.keyCode === 229) return;
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape' && !dialog) {
       if (drawerVisible) void setDrawer(false);
       const menu = newMenu?.open ? newMenu : detailMenu?.open ? detailMenu : null;
@@ -821,10 +840,10 @@
         <button type="button" class="ghost icon-button mobile-search-btn" aria-label="検索 (Ctrl+P)" disabled={blocked}
           on:click={() => void openDialog({ kind: 'search' })}><Icon name="search" /></button>
         {#if blocked}
-          <button type="button" class="primary new-button" disabled><Icon name="plus" size={17} /> 新規</button>
+          <button type="button" class="new-button" disabled><Icon name="plus" size={17} /> 新規</button>
         {:else}
           <details class="menu" bind:this={newMenu}>
-            <summary class="primary new-button"><Icon name="plus" size={17} /> 新規 <Icon name="down" size={13} /></summary>
+            <summary class="new-button"><Icon name="plus" size={17} /> 新規 <Icon name="down" size={13} /></summary>
             <div class="menu-panel">
               <button type="button" on:click={() => void openDialog({ kind: 'web_link' })}><Icon name="link" size={16} /> Webリンクを追加</button>
               <button type="button" on:click={() => void openDialog({ kind: 'knowledge' })}><Icon name="note" size={16} /> ナレッジを追加</button>
@@ -956,7 +975,8 @@
         {/if}
       </aside>
 
-      <main class="detail-pane" bind:this={detailPane} aria-busy={detailLoading || initializing}>
+      <main class="detail-pane" class:writing-pane={view.kind === 'diary' || view.kind === 'page'}
+        bind:this={detailPane} aria-busy={detailLoading || initializing}>
         {#if detailLoading}<div class="loading-line" aria-hidden="true"></div>{/if}
         <button type="button" class="ghost mobile-back-btn" on:click={() => void showList()} disabled={unavailable}>
           <Icon name="left" size={16} /> 一覧へ戻る
@@ -971,8 +991,7 @@
             {@const link = view.link}
             <article class="detail-container">
               <header class="document-header">
-                <div class="document-icon tone-link"><Icon name="link" size={27} /></div>
-                <div class="document-context">Webリンク</div>
+                <div class="document-context"><span class="row-icon tone-link"><Icon name="link" size={16} /></span> Webリンク</div>
                 <div class="detail-title-row">
                   <h1 class="detail-title" tabindex="-1">{link.displayTitle}</h1>
                   <div class="detail-actions">
@@ -992,7 +1011,8 @@
                   </dd></div>
                   <div><dt><Icon name="tag" size={15} /> タグ</dt><dd>
                     {#key link.id}
-                      <TagEditor tags={link.tags} {allTags} disabled={tagsBusy} on:focus={ensureTags} on:change={(event) => void saveRecordTags(event.detail)} />
+                      <TagEditor tags={link.tags} disabled={tagsBusy} on:open={() => void openDialog({ kind: 'record_tags' })}
+                        on:remove={(event) => removeRecordTag(event.detail)} />
                     {/key}
                   </dd></div>
                   <div><dt><Icon name="clock" size={15} /> 更新</dt><dd>{formatTimestamp(link.updatedAtMs)}</dd></div>
@@ -1029,10 +1049,22 @@
             {@const date = view.kind === 'diary' ? view.date : ''}
             {@const page = view.page}
             {@const appearance = date ? searchKinds.diary : page?.kind === 'attached_page' ? searchKinds.attached_page : searchKinds.knowledge_page}
-            <article class="detail-container">
+            <article class="detail-container writing-document">
               <header class="document-header">
-                <div class="document-emblem-row">
-                  <div class={'document-icon tone-' + appearance.tone}><Icon name={date ? 'book' : appearance.icon} size={27} /></div>
+                <div class="document-context document-heading-context">
+                  <div class="document-kind">
+                    <span class={'row-icon tone-' + appearance.tone}><Icon name={date ? 'book' : appearance.icon} size={16} /></span>
+                    {#if date}
+                      <span>{formatDiaryWeekday(date)}</span>
+                      {#if date === today}<span class="quiet-pill today-pill">今日</span>{/if}
+                    {:else if page?.parent}
+                      {@const parent = page.parent}
+                      <button type="button" class="ghost breadcrumb-btn" title={parent.title}
+                        on:click={() => void navigate({ kind: 'web_link', id: parent.id })}><Icon name="left" size={15} /> <span>{parent.title}</span></button>
+                    {:else}
+                      {appearance.label}
+                    {/if}
+                  </div>
                   {#if date}
                     <div class="day-step-row" role="group" aria-label="日付を移動">
                       <button type="button" class="ghost icon-button" aria-label="前日" title="前日" on:click={() => void navigate({ kind: 'diary', date: shiftYmd(date, -1) })}><Icon name="left" size={16} /></button>
@@ -1041,29 +1073,27 @@
                     </div>
                   {/if}
                 </div>
-                <div class="document-context">
-                  {#if date}
-                    <span>{formatDiaryWeekday(date)}</span>
-                    {#if date === today}<span class="quiet-pill today-pill">今日</span>{/if}
-                  {:else if page?.parent}
-                    {@const parent = page.parent}
-                    <button type="button" class="ghost breadcrumb-btn" title={parent.title}
-                      on:click={() => void navigate({ kind: 'web_link', id: parent.id })}><Icon name="left" size={15} /> <span>{parent.title}</span></button>
-                  {:else}
-                    {appearance.label}
-                  {/if}
-                </div>
                 <div class="detail-title-row">
                   {#if date}
                     <h1 class="detail-title diary-title" tabindex="-1"><time datetime={date}>{formatDiaryDate(date)}</time></h1>
                   {:else if renameTitle !== null}
                     <form class="inline-form title-form" on:submit|preventDefault={() => void renamePage()}>
-                      <input type="text" aria-label="ページ名" bind:this={renameInput} bind:value={renameTitle} disabled={renaming} />
-                      <button type="submit" class="primary" disabled={renaming}>保存</button>
-                      <button type="button" disabled={renaming} on:click={() => (renameTitle = null)}>取消</button>
+                      <input type="text" class="detail-title title-input" aria-label="ページ名" placeholder="無題"
+                        bind:this={renameInput} bind:value={renameTitle} disabled={renaming}
+                        on:keydown={(event) => {
+                          if (event.key === 'Escape' && !event.isComposing && event.keyCode !== 229) {
+                            event.preventDefault();
+                            void finishRename();
+                          }
+                        }} />
+                      <button type="submit" class="compact-button primary" disabled={renaming}>保存</button>
+                      <button type="button" class="ghost compact-button" disabled={renaming} on:click={() => void finishRename()}>取消</button>
                     </form>
                   {:else}
-                    <h1 class="detail-title" tabindex="-1">{page?.displayTitle}</h1>
+                    <h1 class="detail-title" tabindex="-1">
+                      <button type="button" class="document-title-trigger" title="ページ名を変更" bind:this={titleButton}
+                        on:click={() => void startRename()}>{page?.displayTitle}</button>
+                    </h1>
                     <details class="menu" bind:this={detailMenu}>
                       <summary class="ghost icon-button" aria-label="ページの操作"><Icon name="dots" /></summary>
                       <div class="menu-panel">
@@ -1077,7 +1107,8 @@
                   <div><dt><Icon name="tag" size={15} /> タグ</dt><dd>
                     {#if page}
                       {#key page.id}
-                        <TagEditor tags={page.tags} {allTags} disabled={tagsBusy} on:focus={ensureTags} on:change={(event) => void saveRecordTags(event.detail)} />
+                        <TagEditor tags={page.tags} disabled={tagsBusy} on:open={() => void openDialog({ kind: 'record_tags' })}
+                          on:remove={(event) => removeRecordTag(event.detail)} />
                       {/key}
                     {:else}
                       <span class="property-placeholder">初回保存後に追加できます</span>
@@ -1120,8 +1151,11 @@
 
 {#if dialog?.kind === 'search'}
   <PaletteModal {allTags} {isMultiPane} {tagListLoading} {tagListError} on:reloadTags={() => void loadTags()} on:select={(event) => openHit(event.detail, true)}
-    on:cancel={() => void cancelSearch()} on:openTodayDiary={() => { clearSearch(); void openToday(); }}
+    on:cancel={() => void closeFocusedDialog()} on:openTodayDiary={() => { clearDialog(); void openToday(); }}
     on:openAddKnowledgePage={() => quickAdd('knowledge')} on:openAddWebLink={() => quickAdd('web_link')} />
+{:else if dialog?.kind === 'record_tags' && tagRecord}
+  <TagPickerModal tags={tagRecord.tags} {allTags} loading={tagListLoading} loadError={tagListError} save={saveRecordTags}
+    on:reload={() => void loadTags()} on:close={() => void closeFocusedDialog()} />
 {:else if dialog?.kind === 'web_link'}
   <WebLinkModal link={dialog.link ?? null} on:close={() => (dialog = null)} on:saved={(event) => onLinkSaved(event.detail)}
     on:openExisting={(event) => { dialog = null; void navigate({ kind: 'web_link', id: event.detail }, 'web_links'); }} />

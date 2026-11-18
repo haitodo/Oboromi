@@ -183,7 +183,8 @@
 <section class="editor-area" aria-label="本文">
   <div class="editor-toolbar">
     <div class="editor-modes" role="group" aria-label="編集モード">
-      <button type="button" aria-pressed={!raw} disabled={changingMode || reloading} on:click={() => void changeMode(false)}>
+      <button type="button" aria-pressed={!raw} title="本文で / を入力してブロックを挿入"
+        disabled={changingMode || reloading} on:click={() => void changeMode(false)}>
         <Icon name="pen" size={15} /> リッチ編集
       </button>
       <button type="button" aria-pressed={raw} disabled={changingMode || reloading} on:click={() => void changeMode(true)}>
@@ -235,6 +236,7 @@
         class="markdown-textarea"
         aria-label={diaryDate ? '日記のMarkdown原文' : 'ページのMarkdown原文'}
         placeholder="Markdown原文を入力…"
+        rows="4"
         spellcheck="false"
         bind:this={rawInput}
         value={draft}
@@ -260,7 +262,4 @@
       {/key}
     {/if}
   </div>
-  {#if !raw && !richFailed && status === 'saved' && !draft.trim()}
-    <p class="editor-hint"><kbd>/</kbd> ブロックを挿入</p>
-  {/if}
 </section>
