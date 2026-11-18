@@ -1,0 +1,63 @@
+# pnpm and Vite
+node_modules/
+/.pnpm-store/
+/.vite/
+/dist/
+*.tsbuildinfo
+
+# Rust and Tauri build output
+/target/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+*.pdb
+
+# Local libraries, backups, and exports
+/data/
+/backups/
+/exports/
+instance.lock
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Environment overrides and signing files
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.local
+*.key
+*.pem
+*.pfx
+*.p12
+*.cer
+*.crt
+*.minisig
+
+# Logs and temporary files
+/logs/
+/tmp/
+/.tmp/
+*.log
+*.tmp
+*.bak
+
+# OS and editor files
+.DS_Store
+Desktop.ini
+*.lnk
+/.vscode/*
+!/.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
